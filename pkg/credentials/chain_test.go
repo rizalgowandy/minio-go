@@ -32,6 +32,12 @@ func (s *testCredProvider) Retrieve() (Value, error) {
 	s.expired = false
 	return s.creds, s.err
 }
+
+func (s *testCredProvider) RetrieveWithCredContext(_ *CredContext) (Value, error) {
+	s.expired = false
+	return s.creds, s.err
+}
+
 func (s *testCredProvider) IsExpired() bool {
 	return s.expired
 }
@@ -58,7 +64,7 @@ func TestChainGet(t *testing.T) {
 		},
 	}
 
-	creds, err := p.Retrieve()
+	creds, err := p.RetrieveWithCredContext(defaultCredContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,7 @@ func TestChainIsExpired(t *testing.T) {
 		t.Fatal("Expected expired to be true before any Retrieve")
 	}
 
-	_, err := p.Retrieve()
+	_, err := p.RetrieveWithCredContext(defaultCredContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +117,7 @@ func TestChainWithNoProvider(t *testing.T) {
 	if !p.IsExpired() {
 		t.Fatal("Expected to be expired with no providers")
 	}
-	_, err := p.Retrieve()
+	_, err := p.RetrieveWithCredContext(defaultCredContext)
 	if err != nil {
 		if err.Error() != "No valid providers found []" {
 			t.Error(err)
@@ -135,7 +141,7 @@ func TestChainProviderWithNoValidProvider(t *testing.T) {
 		t.Fatal("Expected to be expired with no providers")
 	}
 
-	_, err := p.Retrieve()
+	_, err := p.RetrieveWithCredContext(defaultCredContext)
 	if err != nil {
 		if err.Error() != "No valid providers found [FirstError SecondError]" {
 			t.Error(err)

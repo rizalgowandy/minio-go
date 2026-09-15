@@ -48,11 +48,11 @@ func encodeURL2Path(req *http.Request, virtualHost bool) (path string) {
 			path = "/" + bucketName
 			path += req.URL.Path
 			path = s3utils.EncodePath(path)
-			return
+			return path
 		}
 	}
 	path = s3utils.EncodePath(req.URL.Path)
-	return
+	return path
 }
 
 // PreSignV2 - presign the request in following style.
@@ -148,7 +148,7 @@ func SignV2(req http.Request, accessKeyID, secretAccessKey string, virtualHost b
 
 	// Prepare auth header.
 	authHeader := new(bytes.Buffer)
-	authHeader.WriteString(fmt.Sprintf("%s %s:", signV2Algorithm, accessKeyID))
+	fmt.Fprintf(authHeader, "%s %s:", signV2Algorithm, accessKeyID)
 	encoder := base64.NewEncoder(base64.StdEncoding, authHeader)
 	encoder.Write(hm.Sum(nil))
 	encoder.Close()
@@ -162,11 +162,12 @@ func SignV2(req http.Request, accessKeyID, secretAccessKey string, virtualHost b
 // From the Amazon docs:
 //
 // StringToSign = HTTP-Verb + "\n" +
-// 	 Content-Md5 + "\n" +
-//	 Content-Type + "\n" +
-//	 Expires + "\n" +
-//	 CanonicalizedProtocolHeaders +
-//	 CanonicalizedResource;
+//
+//	Content-Md5 + "\n" +
+//	Content-Type + "\n" +
+//	Expires + "\n" +
+//	CanonicalizedProtocolHeaders +
+//	CanonicalizedResource;
 func preStringToSignV2(req http.Request, virtualHost bool) string {
 	buf := new(bytes.Buffer)
 	// Write standard headers.
@@ -189,11 +190,12 @@ func writePreSignV2Headers(buf *bytes.Buffer, req http.Request) {
 // From the Amazon docs:
 //
 // StringToSign = HTTP-Verb + "\n" +
-// 	 Content-Md5 + "\n" +
-//	 Content-Type + "\n" +
-//	 Date + "\n" +
-//	 CanonicalizedProtocolHeaders +
-//	 CanonicalizedResource;
+//
+//	Content-Md5 + "\n" +
+//	Content-Type + "\n" +
+//	Date + "\n" +
+//	CanonicalizedProtocolHeaders +
+//	CanonicalizedResource;
 func stringToSignV2(req http.Request, virtualHost bool) string {
 	buf := new(bytes.Buffer)
 	// Write standard headers.
@@ -243,10 +245,14 @@ func writeCanonicalizedHeaders(buf *bytes.Buffer, req http.Request) {
 // http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#RESTAuthenticationStringToSign
 
 // Whitelist resource list that will be used in query string for signature-V2 calculation.
-// The list should be alphabetically sorted
+//
+// This list should be kept alphabetically sorted, do not hastily edit.
 var resourceList = []string{
 	"acl",
+	"cors",
 	"delete",
+	"encryption",
+	"legal-hold",
 	"lifecycle",
 	"location",
 	"logging",
@@ -261,6 +267,10 @@ var resourceList = []string{
 	"response-content-language",
 	"response-content-type",
 	"response-expires",
+	"retention",
+	"select",
+	"select-type",
+	"tagging",
 	"torrent",
 	"uploadId",
 	"uploads",
@@ -273,8 +283,9 @@ var resourceList = []string{
 // From the Amazon docs:
 //
 // CanonicalizedResource = [ "/" + Bucket ] +
-// 	  <HTTP-Request-URI, from the protocol name up to the query string> +
-// 	  [ sub-resource, if present. For example "?acl", "?location", "?logging", or "?torrent"];
+//
+//	<HTTP-Request-URI, from the protocol name up to the query string> +
+//	[ sub-resource, if present. For example "?acl", "?location", "?logging", or "?torrent"];
 func writeCanonicalizedResource(buf *bytes.Buffer, req http.Request, virtualHost bool) {
 	// Save request URL.
 	requestURL := req.URL

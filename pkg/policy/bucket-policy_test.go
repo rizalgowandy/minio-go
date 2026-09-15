@@ -18,6 +18,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -29,7 +30,7 @@ import (
 // of bucket policies, to verify the correctness of BucketAccessPolicy
 // struct defined in this package.
 func TestUnmarshalBucketPolicy(t *testing.T) {
-	var testCases = []struct {
+	testCases := []struct {
 		policyData    string
 		shouldSucceed bool
 	}{
@@ -210,6 +211,51 @@ func TestUnmarshalBucketPolicy(t *testing.T) {
     }
   ]
 }`, shouldSucceed: true},
+		// Test 10
+		{policyData: `{
+	"Version": "2012-10-17",
+	"Statement": [{
+		"Effect": "Deny",
+		"Principal": {
+			"AWS": [
+				"*"
+			]
+		},
+		"Action": [
+			"s3:PutObject"
+		],
+		"Resource": [
+			"arn:aws:s3:::mytest/*"
+		],
+		"Condition": {
+			"Null": {
+				"s3:x-amz-server-side-encryption": [
+					true
+				]
+			}
+		}
+	}]
+}`, shouldSucceed: true},
+		// Test 11
+		{policyData: `{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:PutObject",
+            "Resource": [
+                "arn:aws:s3:::DOC-EXAMPLE-BUCKET1",
+                "arn:aws:s3:::DOC-EXAMPLE-BUCKET1/*"
+            ],
+            "Condition": {
+                "NumericLessThan": {
+                    "s3:TlsVersion": 1.2
+                }
+            }
+        }
+    ]
+}`, shouldSucceed: true},
 	}
 
 	for i, testCase := range testCases {
@@ -330,7 +376,7 @@ func TestNewStatements(t *testing.T) {
 		// BucketPolicyReadOnly: with empty bucket name empty prefix.
 		{BucketPolicyReadOnly, "", "hello", `[]`},
 		// BucketPolicyReadOnly: with bucket name prefix.
-		{BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		{BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 		// BucketPolicyReadWrite: with empty bucket name and prefix.
 		{BucketPolicyReadWrite, "", "", `[]`},
 		// BucketPolicyReadWrite: with bucket name and empty prefix.
@@ -338,7 +384,7 @@ func TestNewStatements(t *testing.T) {
 		// BucketPolicyReadWrite: with empty bucket name empty prefix.
 		{BucketPolicyReadWrite, "", "hello", `[]`},
 		// BucketPolicyReadWrite: with bucket name prefix.
-		{BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		{BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 		// BucketPolicyWriteOnly: with empty bucket name and prefix.
 		{BucketPolicyWriteOnly, "", "", `[]`},
 		// BucketPolicyWriteOnly: with bucket name and empty prefix.
@@ -494,7 +540,7 @@ func TestGetInUsePolicy(t *testing.T) {
 
 	for _, testCase := range testCases {
 		result1, result2 := getInUsePolicy(testCase.statements, testCase.bucketName, testCase.prefix)
-		if !(result1 == testCase.expectedResult1 && result2 == testCase.expectedResult2) {
+		if result1 != testCase.expectedResult1 || result2 != testCase.expectedResult2 {
 			t.Fatalf("%+v: expected: [%t,%t], got: [%t,%t]", testCase,
 				testCase.expectedResult1, testCase.expectedResult2,
 				result1, result2)
@@ -1325,6 +1371,30 @@ func TestGetBucketPolicy(t *testing.T) {
 	notHelloCondMap := make(ConditionMap)
 	notHelloCondMap.Add("StringNotEquals", worldCondKeyMap)
 
+	// StringLike condition map for "hello*"
+	stringLikeHelloCondMap := make(ConditionMap)
+	stringLikeHelloCondKeyMap := make(ConditionKeyMap)
+	stringLikeHelloCondKeyMap.Add("s3:prefix", set.CreateStringSet("hello*"))
+	stringLikeHelloCondMap.Add("StringLike", stringLikeHelloCondKeyMap)
+
+	// StringLike condition map for "world*"
+	stringLikeWorldCondMap := make(ConditionMap)
+	stringLikeWorldCondKeyMap := make(ConditionKeyMap)
+	stringLikeWorldCondKeyMap.Add("s3:prefix", set.CreateStringSet("world*"))
+	stringLikeWorldCondMap.Add("StringLike", stringLikeWorldCondKeyMap)
+
+	// StringNotLike condition map for "hello*"
+	stringNotLikeHelloCondMap := make(ConditionMap)
+	stringNotLikeHelloCondKeyMap := make(ConditionKeyMap)
+	stringNotLikeHelloCondKeyMap.Add("s3:prefix", set.CreateStringSet("hello*"))
+	stringNotLikeHelloCondMap.Add("StringNotLike", stringNotLikeHelloCondKeyMap)
+
+	// StringNotLike condition map for "world*"
+	stringNotLikeWorldCondMap := make(ConditionMap)
+	stringNotLikeWorldCondKeyMap := make(ConditionKeyMap)
+	stringNotLikeWorldCondKeyMap.Add("s3:prefix", set.CreateStringSet("world*"))
+	stringNotLikeWorldCondMap.Add("StringNotLike", stringNotLikeWorldCondKeyMap)
+
 	testCases := []struct {
 		statement       Statement
 		prefix          string
@@ -1502,11 +1572,69 @@ func TestGetBucketPolicy(t *testing.T) {
 			Conditions: notHelloCondMap,
 			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
 		}, "hello", false, true, false},
+
+		// Statement with StringLike condition for "hello*" pattern with empty prefix - should not grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringLikeHelloCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "", false, false, false},
+		// Statement with StringLike condition for "hello*" pattern with "hello" prefix - should grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringLikeHelloCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "hello", false, true, false},
+		// Statement with StringLike condition for "world*" pattern with "hello" prefix - should not grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringLikeWorldCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "hello", false, false, false},
+
+		// Statement with StringNotLike condition for "hello*" pattern with empty prefix - should not grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringNotLikeHelloCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "", false, false, false},
+		// Statement with StringNotLike condition for "hello*" pattern with "hello" prefix - prefix matches pattern so should not grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringNotLikeHelloCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "hello", false, false, false},
+		// Statement with StringNotLike condition for "world*" pattern with "hello" prefix - prefix doesn't match pattern so should grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringNotLikeWorldCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "hello", false, true, false},
+		// Statement with StringNotLike condition for "world*" pattern with "world" prefix - prefix matches pattern so should not grant readOnly access.
+		{Statement{
+			Actions:    readOnlyBucketActions,
+			Effect:     "Allow",
+			Principal:  User{AWS: set.CreateStringSet("*")},
+			Conditions: stringNotLikeWorldCondMap,
+			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
+		}, "world", false, false, false},
 	}
 
 	for _, testCase := range testCases {
 		commonFound, readOnly, writeOnly := getBucketPolicy(testCase.statement, testCase.prefix)
-		if !(testCase.expectedResult1 == commonFound && testCase.expectedResult2 == readOnly && testCase.expectedResult3 == writeOnly) {
+		if testCase.expectedResult1 != commonFound || testCase.expectedResult2 != readOnly || testCase.expectedResult3 != writeOnly {
 			t.Fatalf("%+v: expected: [%t,%t,%t], got: [%t,%t,%t]", testCase,
 				testCase.expectedResult1, testCase.expectedResult2, testCase.expectedResult3,
 				commonFound, readOnly, writeOnly)
@@ -1568,7 +1696,7 @@ func TestGetObjectPolicy(t *testing.T) {
 
 	for _, testCase := range testCases {
 		readOnly, writeOnly := getObjectPolicy(testCase.statement)
-		if !(testCase.expectedResult1 == readOnly && testCase.expectedResult2 == writeOnly) {
+		if testCase.expectedResult1 != readOnly || testCase.expectedResult2 != writeOnly {
 			t.Fatalf("%+v: expected: [%t,%t], got: [%t,%t]", testCase,
 				testCase.expectedResult1, testCase.expectedResult2,
 				readOnly, writeOnly)
@@ -1578,7 +1706,6 @@ func TestGetObjectPolicy(t *testing.T) {
 
 // GetPolicyRules is called and the result is validated
 func TestListBucketPolicies(t *testing.T) {
-
 	// Condition for read objects
 	downloadCondMap := make(ConditionMap)
 	downloadCondKeyMap := make(ConditionKeyMap)
@@ -1629,14 +1756,16 @@ func TestListBucketPolicies(t *testing.T) {
 				Effect:    "Allow",
 				Principal: User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet("arn:aws:s3:::mybucket/download*"),
-			}}, "mybucket", "", map[string]BucketPolicy{"mybucket/download*": BucketPolicyReadOnly}},
+			},
+		}, "mybucket", "", map[string]BucketPolicy{"mybucket/download*": BucketPolicyReadOnly}},
 		{[]Statement{
 			{
 				Actions:   commonSetActions.Union(readOnlyObjectActions),
 				Effect:    "Allow",
 				Principal: User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet("arn:aws:s3:::mybucket", "arn:aws:s3:::mybucket/*"),
-			}}, "mybucket", "", map[string]BucketPolicy{"mybucket/*": BucketPolicyReadOnly}},
+			},
+		}, "mybucket", "", map[string]BucketPolicy{"mybucket/*": BucketPolicyReadOnly}},
 		// Write Only
 		{[]Statement{
 			{
@@ -1650,7 +1779,8 @@ func TestListBucketPolicies(t *testing.T) {
 				Effect:    "Allow",
 				Principal: User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet("arn:aws:s3:::mybucket/upload*"),
-			}}, "mybucket", "", map[string]BucketPolicy{"mybucket/upload*": BucketPolicyWriteOnly}},
+			},
+		}, "mybucket", "", map[string]BucketPolicy{"mybucket/upload*": BucketPolicyWriteOnly}},
 		// Readwrite
 		{[]Statement{
 			{
@@ -1671,7 +1801,8 @@ func TestListBucketPolicies(t *testing.T) {
 				Effect:    "Allow",
 				Principal: User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet("arn:aws:s3:::mybucket/both*"),
-			}}, "mybucket", "", map[string]BucketPolicy{"mybucket/both*": BucketPolicyReadWrite}},
+			},
+		}, "mybucket", "", map[string]BucketPolicy{"mybucket/both*": BucketPolicyReadWrite}},
 	}
 
 	for _, testCase := range testCases {
@@ -1859,7 +1990,7 @@ func TestSetPolicy(t *testing.T) {
 		// BucketPolicyReadOnly - empty statements, bucket name and non-empty prefix.
 		{[]Statement{}, BucketPolicyReadOnly, "", "hello", `[]`},
 		// BucketPolicyReadOnly - empty statements, non-empty bucket name and non-empty prefix.
-		{[]Statement{}, BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		{[]Statement{}, BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 		// BucketPolicyWriteOnly - empty statements, bucket name and prefix.
 		{[]Statement{}, BucketPolicyReadOnly, "", "", `[]`},
 		// BucketPolicyWriteOnly - non-empty statements, bucket name and prefix.
@@ -1889,7 +2020,7 @@ func TestSetPolicy(t *testing.T) {
 		// BucketPolicyReadWrite - empty statements, bucket name and non-empty prefix.
 		{[]Statement{}, BucketPolicyReadWrite, "", "hello", `[]`},
 		// BucketPolicyReadWrite - empty statements, non-empty bucket name and non-empty prefix.
-		{[]Statement{}, BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation","s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		{[]Statement{}, BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation","s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 		// Set readonly.
 		{[]Statement{{
 			Actions:   writeOnlyBucketActions,
@@ -1903,7 +2034,7 @@ func TestSetPolicy(t *testing.T) {
 			Effect:    "Allow",
 			Principal: User{AWS: set.CreateStringSet("*")},
 			Resources: set.CreateStringSet("arn:aws:s3:::mybucket"),
-		}}, BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		}}, BucketPolicyReadOnly, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 		// Set writeonly.
 		{[]Statement{{
 			Actions:   readOnlyBucketActions,
@@ -1934,7 +2065,7 @@ func TestSetPolicy(t *testing.T) {
 			Principal:  User{AWS: set.CreateStringSet("*")},
 			Conditions: helloCondMap,
 			Resources:  set.CreateStringSet("arn:aws:s3:::mybucket"),
-		}}, BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation","s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringEquals":{"s3:prefix":["hello"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
+		}}, BucketPolicyReadWrite, "mybucket", "hello", `[{"Action":["s3:GetBucketLocation","s3:ListBucketMultipartUploads"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:ListBucket"],"Condition":{"StringLike":{"s3:prefix":["hello*"]}},"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket"],"Sid":""},{"Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:GetObject","s3:ListMultipartUploadParts","s3:PutObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::mybucket/hello*"],"Sid":""}]`},
 	}
 
 	for _, testCase := range testCases {
@@ -1973,7 +2104,6 @@ func TestIsValidBucketPolicy(t *testing.T) {
 
 // Tests validate Bucket policy resource matcher.
 func TestBucketPolicyResourceMatch(t *testing.T) {
-
 	// generates\ statement with given resource..
 	generateStatement := func(resource string) Statement {
 		statement := Statement{}

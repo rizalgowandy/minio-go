@@ -1,8 +1,9 @@
+//go:build example
 // +build example
 
 /*
  * MinIO Go Library for Amazon S3 Compatible Cloud Storage
- * Copyright 2019 MinIO, Inc.
+ * Copyright 2020 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,43 +22,33 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 func main() {
-	// Note: YOUR-ACCESSKEYID, YOUR-SECRETACCESSKEY, my-bucketname and my-prefixname
-	// are dummy values, please replace them with original values.
+	// Note: YOUR-ACCESSKEYID, YOUR-SECRETACCESSKEY and my-bucketname are
+	// dummy values, please replace them with original values.
 
 	// Requests are always secure (HTTPS) by default. Set secure=false to enable insecure (HTTP) access.
 	// This boolean value is the last argument for New().
 
 	// New returns an Amazon S3 compatible client object. API compatibility (v2 or v4) is automatically
 	// determined based on the Endpoint value.
-	s3Client, err := minio.New("s3.amazonaws.com", &minio.Options{
+	s3Client, err := minio.New("play.min.io", &minio.Options{
 		Creds:  credentials.NewStaticV4("YOUR-ACCESSKEYID", "YOUR-SECRETACCESSKEY", ""),
 		Secure: true,
 	})
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Fatalln(err)
 	}
-
-	opts := minio.ListObjectsOptions{
-		WithMetadata: true,
-		Prefix:       "my-prefixname",
-		Recursive:    true,
+	// s3Client.TraceOn(os.Stderr)
+	// Get bucket replication configuration from S3
+	err = s3Client.CheckBucketReplication(context.Background(), "bucket")
+	if err != nil {
+		log.Fatalln(err)
 	}
-
-	// List all objects from a bucket-name with a matching prefix.
-	for object := range s3Client.ListObjects(context.Background(), "my-bucketname", opts) {
-		if object.Err != nil {
-			fmt.Println(object.Err)
-			return
-		}
-		fmt.Println(object)
-	}
-	return
+	log.Println("Bucket replication configuration is valid")
 }

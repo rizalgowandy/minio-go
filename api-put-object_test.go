@@ -17,7 +17,14 @@
 package minio
 
 import (
+	"context"
+	"encoding/base64"
+	"net/http"
+	"reflect"
 	"testing"
+	"time"
+
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 )
 
 func TestPutObjectOptionsValidate(t *testing.T) {
@@ -55,9 +62,166 @@ func TestPutObjectOptionsValidate(t *testing.T) {
 	for i, testCase := range testCases {
 		err := PutObjectOptions{UserMetadata: map[string]string{
 			testCase.name: testCase.value,
-		}}.validate()
+		}}.validate(nil)
 		if testCase.shouldPass && err != nil {
 			t.Errorf("Test %d - output did not match with reference results, %s", i+1, err)
 		}
+	}
+}
+
+type InterceptRouteTripper struct {
+	request *http.Request
+}
+
+func (i *InterceptRouteTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	i.request = request
+	return &http.Response{StatusCode: 200}, nil
+}
+
+func Test_SSEHeaders(t *testing.T) {
+	rt := &InterceptRouteTripper{}
+	c, err := New("s3.amazonaws.com", &Options{
+		Transport: rt,
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	testCases := map[string]struct {
+		sse                            func() encrypt.ServerSide
+		initiateMultipartUploadHeaders http.Header
+		headerNotAllowedAfterInit      []string
+	}{
+		"noEncryption": {
+			sse:                            func() encrypt.ServerSide { return nil },
+			initiateMultipartUploadHeaders: http.Header{},
+		},
+		"sse": {
+			sse: func() encrypt.ServerSide {
+				s, err := encrypt.NewSSEKMS("keyId", nil)
+				if err != nil {
+					t.Error(err)
+				}
+				return s
+			},
+			initiateMultipartUploadHeaders: http.Header{
+				encrypt.SseGenericHeader: []string{"aws:kms"},
+				encrypt.SseKmsKeyID:      []string{"keyId"},
+			},
+			headerNotAllowedAfterInit: []string{encrypt.SseGenericHeader, encrypt.SseKmsKeyID, encrypt.SseEncryptionContext},
+		},
+		"sse with context": {
+			sse: func() encrypt.ServerSide {
+				s, err := encrypt.NewSSEKMS("keyId", "context")
+				if err != nil {
+					t.Error(err)
+				}
+				return s
+			},
+			initiateMultipartUploadHeaders: http.Header{
+				encrypt.SseGenericHeader:     []string{"aws:kms"},
+				encrypt.SseKmsKeyID:          []string{"keyId"},
+				encrypt.SseEncryptionContext: []string{base64.StdEncoding.EncodeToString([]byte("\"context\""))},
+			},
+			headerNotAllowedAfterInit: []string{encrypt.SseGenericHeader, encrypt.SseKmsKeyID, encrypt.SseEncryptionContext},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			opts := PutObjectOptions{
+				ServerSideEncryption: tc.sse(),
+			}
+			c.bucketLocCache.Set("test", "region")
+			c.initiateMultipartUpload(context.Background(), "test", "test", opts)
+			for s, vls := range tc.initiateMultipartUploadHeaders {
+				if !reflect.DeepEqual(rt.request.Header[s], vls) {
+					t.Errorf("Header %v are not equal, want: %v got %v", s, vls, rt.request.Header[s])
+				}
+			}
+
+			_, err := c.uploadPart(context.Background(), uploadPartParams{
+				bucketName: "test",
+				objectName: "test",
+				partNumber: 1,
+				uploadID:   "upId",
+				sse:        opts.ServerSideEncryption,
+			})
+			if err != nil {
+				t.Error(err)
+			}
+
+			for _, k := range tc.headerNotAllowedAfterInit {
+				if rt.request.Header.Get(k) != "" {
+					t.Errorf("header %v should not be set", k)
+				}
+			}
+
+			c.completeMultipartUpload(context.Background(), "test", "test", "upId", completeMultipartUpload{}, opts)
+
+			for _, k := range tc.headerNotAllowedAfterInit {
+				if rt.request.Header.Get(k) != "" {
+					t.Errorf("header %v should not be set", k)
+				}
+			}
+		})
+	}
+}
+
+// TestCompleteUploadOpts checks that the options sent on
+// CompleteMultipartUpload keep opts.Internal. MinIO reads
+// x-minio-source-mtime and x-minio-source-replication-request from the
+// complete request and from nowhere else, so dropping Internal silently
+// discards a preserved modification time on every multipart upload.
+func TestCompleteUploadOpts(t *testing.T) {
+	mtime := time.Date(2026, 8, 21, 15, 42, 50, 543000000, time.UTC)
+	sse, err := encrypt.NewSSEC(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := PutObjectOptions{
+		ContentType:          "text/plain",
+		StorageClass:         "REDUCED_REDUNDANCY",
+		UserMetadata:         map[string]string{"Key": "value"},
+		ServerSideEncryption: sse,
+		AutoChecksum:         ChecksumCRC32C,
+	}
+	opts.Internal.SourceMTime = mtime
+	opts.Internal.SourceETag = "0d2e0d0e0f0a0b0c"
+	opts.Internal.ReplicationRequest = true
+
+	got := completeUploadOpts(opts)
+
+	if !got.Internal.SourceMTime.Equal(mtime) {
+		t.Errorf("SourceMTime = %v, want %v", got.Internal.SourceMTime, mtime)
+	}
+	if got.Internal.SourceETag != opts.Internal.SourceETag {
+		t.Errorf("SourceETag = %q, want %q", got.Internal.SourceETag, opts.Internal.SourceETag)
+	}
+	if !got.Internal.ReplicationRequest {
+		t.Error("ReplicationRequest = false, want true")
+	}
+	if got.ServerSideEncryption != sse {
+		t.Error("ServerSideEncryption was dropped")
+	}
+	if got.AutoChecksum != opts.AutoChecksum {
+		t.Errorf("AutoChecksum = %v, want %v", got.AutoChecksum, opts.AutoChecksum)
+	}
+
+	// Options that already applied at NewMultipartUpload must not be repeated.
+	if got.ContentType != "" || got.StorageClass != "" || got.UserMetadata != nil {
+		t.Errorf("upload-wide options leaked into the complete request: %+v", got)
+	}
+
+	header := got.Header()
+	if v := header.Get(minIOBucketSourceMTime); v != mtime.Format(time.RFC3339Nano) {
+		t.Errorf("%s header = %q, want %q", minIOBucketSourceMTime, v, mtime.Format(time.RFC3339Nano))
+	}
+	if v := header.Get(minIOBucketReplicationRequest); v != "true" {
+		t.Errorf("%s header = %q, want %q", minIOBucketReplicationRequest, v, "true")
+	}
+	if v := header.Get(amzStorageClass); v != "" {
+		t.Errorf("%s header = %q, want it absent", amzStorageClass, v)
 	}
 }

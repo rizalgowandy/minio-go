@@ -20,15 +20,16 @@ package minio
 import (
 	"bytes"
 	"context"
+	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
-	"math/rand"
-
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 )
 
 const (
@@ -40,12 +41,12 @@ const (
 
 // Tests for Core GetObject() function.
 func TestGetObjectCore(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for the short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio core client object.
 	c, err := NewCore(
@@ -85,7 +86,7 @@ func TestGetObjectCore(t *testing.T) {
 		t.Fatal("Error:", err, bucketName, objectName)
 	}
 
-	st, err := c.Client.StatObject(context.Background(), bucketName, objectName, StatObjectOptions{})
+	st, err := c.StatObject(context.Background(), bucketName, objectName, StatObjectOptions{})
 	if err != nil {
 		t.Fatal("Stat error:", err, bucketName, objectName)
 	}
@@ -166,7 +167,7 @@ func TestGetObjectCore(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected GetObject should fail with mismatching etags")
 	}
-	if errResp := ToErrorResponse(err); errResp.Code != "PreconditionFailed" {
+	if errResp := ToErrorResponse(err); errResp.Code != PreconditionFailed {
 		t.Fatalf("Expected \"PreconditionFailed\" as code, got %s instead", errResp.Code)
 	}
 
@@ -237,12 +238,12 @@ func TestGetObjectCore(t *testing.T) {
 // Tests GetObject to return Content-Encoding properly set
 // and overrides any auto decoding.
 func TestGetObjectContentEncoding(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for the short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio core client object.
 	c, err := NewCore(
@@ -310,12 +311,12 @@ func TestGetObjectContentEncoding(t *testing.T) {
 
 // Tests get bucket policy core API.
 func TestGetBucketPolicy(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio client object.
 	c, err := NewCore(
@@ -357,7 +358,7 @@ func TestGetBucketPolicy(t *testing.T) {
 	bucketPolicy, err := c.GetBucketPolicy(context.Background(), bucketName)
 	if err != nil {
 		errResp := ToErrorResponse(err)
-		if errResp.Code != "NoSuchBucketPolicy" {
+		if errResp.Code != NoSuchBucketPolicy {
 			t.Error("Error:", err, bucketName)
 		}
 	}
@@ -373,12 +374,12 @@ func TestGetBucketPolicy(t *testing.T) {
 
 // Tests Core CopyObject API implementation.
 func TestCoreCopyObject(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio client object.
 	c, err := NewCore(
@@ -430,6 +431,11 @@ func TestCoreCopyObject(t *testing.T) {
 		t.Fatalf("Error: number of bytes does not match, want %v, got %v\n", len(buf), st.Size)
 	}
 
+	// When the server auto-encrypts objects (e.g. SSE-KMS), the ETag is not the
+	// content MD5 and a metadata-only copy re-encrypts the object, producing a
+	// new ETag. Only assert ETag equality for unencrypted objects.
+	srcEncrypted := st.Metadata.Get("X-Amz-Server-Side-Encryption") != ""
+
 	destBucketName := bucketName
 	destObjectName := objectName + "-dest"
 
@@ -440,7 +446,7 @@ func TestCoreCopyObject(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error:", err, bucketName, objectName, destBucketName, destObjectName)
 	}
-	if cuploadInfo.ETag != uploadInfo.ETag {
+	if !srcEncrypted && cuploadInfo.ETag != uploadInfo.ETag {
 		t.Fatalf("Error: expected etag to be same as source object %s, but found different etag %s", uploadInfo.ETag, cuploadInfo.ETag)
 	}
 
@@ -464,7 +470,7 @@ func TestCoreCopyObject(t *testing.T) {
 		t.Fatalf("Error: Content types don't match, expected: application/javascript, found: %+v\n", st.ContentType)
 	}
 
-	if st.ETag != uploadInfo.ETag {
+	if !srcEncrypted && st.ETag != uploadInfo.ETag {
 		t.Fatalf("Error: expected etag to be same as source object %s, but found different etag :%s", uploadInfo.ETag, st.ETag)
 	}
 
@@ -496,12 +502,12 @@ func TestCoreCopyObject(t *testing.T) {
 
 // Test Core CopyObjectPart implementation
 func TestCoreCopyObjectPart(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio client object.
 	c, err := NewCore(
@@ -649,12 +655,12 @@ func TestCoreCopyObjectPart(t *testing.T) {
 
 // Test Core PutObject.
 func TestCorePutObject(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for short runs")
 	}
-
-	// Seed random based on current time.
-	rand.Seed(time.Now().Unix())
 
 	// Instantiate new minio client object.
 	c, err := NewCore(
@@ -743,6 +749,9 @@ func TestCorePutObject(t *testing.T) {
 }
 
 func TestCoreGetObjectMetadata(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
 	if testing.Short() {
 		t.Skip("skipping functional tests for the short runs")
 	}
@@ -796,5 +805,99 @@ func TestCoreGetObjectMetadata(t *testing.T) {
 	err = core.RemoveBucket(context.Background(), bucketName)
 	if err != nil {
 		t.Fatal("Error:", err)
+	}
+}
+
+func TestCoreMultipartUpload(t *testing.T) {
+	if os.Getenv(serverEndpoint) == "" {
+		t.Skip("SERVER_ENDPOINT not set")
+	}
+	if testing.Short() {
+		t.Skip("skipping functional tests for the short runs")
+	}
+
+	// Instantiate new minio client object.
+	core, err := NewCore(
+		os.Getenv(serverEndpoint),
+		&Options{
+			Creds:  credentials.NewStaticV4(os.Getenv(accessKey), os.Getenv(secretKey), ""),
+			Secure: mustParseBool(os.Getenv(enableSecurity)),
+		})
+	if err != nil {
+		t.Fatal("Error:", err)
+	}
+
+	bucketName := randString(60, rand.NewSource(time.Now().UnixNano()), "minio-go-test")
+	// Make a new bucket.
+	err = core.MakeBucket(context.Background(), bucketName, MakeBucketOptions{Region: "us-east-1"})
+	if err != nil {
+		t.Fatal("Error:", err, bucketName)
+	}
+	objectName := randString(60, rand.NewSource(time.Now().UnixNano()), "")
+
+	objectContentType := "binary/octet-stream"
+	metadata := make(map[string]string)
+	metadata["Content-Type"] = objectContentType
+	putopts := PutObjectOptions{
+		UserMetadata: metadata,
+	}
+	uploadID, err := core.NewMultipartUpload(context.Background(), bucketName, objectName, putopts)
+	if err != nil {
+		t.Fatal("Error:", err, bucketName, objectName)
+	}
+	buf := bytes.Repeat([]byte("a"), 32*1024*1024)
+	r := bytes.NewReader(buf)
+	partBuf := make([]byte, 100*1024*1024)
+	parts := make([]CompletePart, 0, 5)
+	partID := 0
+	for {
+		n, err := r.Read(partBuf)
+		if err != nil && err != io.EOF {
+			t.Fatal("Error:", err)
+		}
+		if err == io.EOF {
+			break
+		}
+		if n > 0 {
+			partID++
+			data := bytes.NewReader(partBuf[:n])
+			dataLen := int64(len(partBuf[:n]))
+			objectPart, err := core.PutObjectPart(context.Background(), bucketName, objectName, uploadID, partID,
+				data, dataLen,
+				PutObjectPartOptions{
+					Md5Base64:    "",
+					Sha256Hex:    "",
+					SSE:          encrypt.NewSSE(),
+					CustomHeader: nil,
+					Trailer:      nil,
+				},
+			)
+			if err != nil {
+				t.Fatal("Error:", err, bucketName, objectName)
+			}
+			parts = append(parts, CompletePart{
+				PartNumber: partID,
+				ETag:       objectPart.ETag,
+			})
+		}
+	}
+	objectParts, err := core.listObjectParts(context.Background(), bucketName, objectName, uploadID)
+	if err != nil {
+		t.Fatal("Error:", err)
+	}
+	if len(objectParts) != len(parts) {
+		t.Fatal("Error", len(objectParts), len(parts))
+	}
+	_, err = core.CompleteMultipartUpload(context.Background(), bucketName, objectName, uploadID, parts, putopts)
+	if err != nil {
+		t.Fatal("Error:", err)
+	}
+
+	if err := core.RemoveObject(context.Background(), bucketName, objectName, RemoveObjectOptions{}); err != nil {
+		t.Fatal("Error: ", err)
+	}
+
+	if err := core.RemoveBucket(context.Background(), bucketName); err != nil {
+		t.Fatal("Error: ", err)
 	}
 }

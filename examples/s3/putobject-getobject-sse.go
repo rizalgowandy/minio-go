@@ -1,3 +1,4 @@
+//go:build example
 // +build example
 
 /*
@@ -22,7 +23,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
+	"io"
 	"log"
 
 	"github.com/minio/minio-go/v7"
@@ -62,7 +63,7 @@ func main() {
 	}
 	defer reader.Close()
 
-	decBytes, err := ioutil.ReadAll(reader)
+	decBytes, err := io.ReadAll(reader)
 	if err != nil {
 		log.Fatalln(err)
 	}

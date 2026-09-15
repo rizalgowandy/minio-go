@@ -20,93 +20,83 @@ package s3utils
 import (
 	"errors"
 	"net/url"
-	"reflect"
+	"strings"
 	"testing"
 )
 
 // Tests get region from host URL.
 func TestGetRegionFromURL(t *testing.T) {
 	testCases := []struct {
-		u              url.URL
+		u              string
 		expectedRegion string
 	}{
-		{
-			u:              url.URL{Host: "storage.googleapis.com"},
-			expectedRegion: "",
-		},
-		{
-			u:              url.URL{Host: "s3.cn-north-1.amazonaws.com.cn"},
-			expectedRegion: "cn-north-1",
-		},
-		{
-			u:              url.URL{Host: "s3.dualstack.cn-north-1.amazonaws.com.cn"},
-			expectedRegion: "cn-north-1",
-		},
-		{
-			u:              url.URL{Host: "s3.cn-northwest-1.amazonaws.com.cn"},
-			expectedRegion: "cn-northwest-1",
-		},
-		{
-			u:              url.URL{Host: "s3.dualstack.cn-northwest-1.amazonaws.com.cn"},
-			expectedRegion: "cn-northwest-1",
-		},
-		{
-			u:              url.URL{Host: "s3-fips-us-gov-west-1.amazonaws.com"},
-			expectedRegion: "us-gov-west-1",
-		},
-		{
-			u:              url.URL{Host: "s3-fips.us-gov-west-1.amazonaws.com"},
-			expectedRegion: "us-gov-west-1",
-		},
-		{
-			u:              url.URL{Host: "s3-us-gov-west-1.amazonaws.com"},
-			expectedRegion: "us-gov-west-1",
-		},
-		{
-			u:              url.URL{Host: "192.168.1.1"},
-			expectedRegion: "",
-		},
-		{
-			u:              url.URL{Host: "s3-eu-west-1.amazonaws.com"},
-			expectedRegion: "eu-west-1",
-		},
-		{
-			u:              url.URL{Host: "s3.eu-west-1.amazonaws.com"},
-			expectedRegion: "eu-west-1",
-		},
-		{
-			u:              url.URL{Host: "s3.dualstack.eu-west-1.amazonaws.com"},
-			expectedRegion: "eu-west-1",
-		},
-		{
-			u:              url.URL{Host: "s3.amazonaws.com"},
-			expectedRegion: "",
-		},
-		{
-			u:              url.URL{Host: "s3-external-1.amazonaws.com"},
-			expectedRegion: "",
-		},
-		{
-			u: url.URL{
-				Host: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.us-west-2.amazonaws.com",
-			},
-			expectedRegion: "",
-		},
-		{
-			u: url.URL{
-				Host: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com",
-			},
-			expectedRegion: "",
-		},
-		{
-			u: url.URL{
-				Host: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com.cn",
-			},
-		},
+		{u: "storage.googleapis.com", expectedRegion: ""},
+		{u: "s3.cn-north-1.amazonaws.com.cn", expectedRegion: "cn-north-1"},
+		{u: "s3.dualstack.cn-north-1.amazonaws.com.cn", expectedRegion: "cn-north-1"},
+		{u: "s3.cn-northwest-1.amazonaws.com.cn", expectedRegion: "cn-northwest-1"},
+		{u: "s3.dualstack.cn-northwest-1.amazonaws.com.cn", expectedRegion: "cn-northwest-1"},
+		{u: "s3-fips-us-gov-west-1.amazonaws.com", expectedRegion: "us-gov-west-1"},
+		{u: "s3-fips.us-gov-west-1.amazonaws.com", expectedRegion: "us-gov-west-1"},
+		{u: "s3-fips.us-gov-east-1.amazonaws.com", expectedRegion: "us-gov-east-1"},
+		{u: "s3-us-gov-west-1.amazonaws.com", expectedRegion: "us-gov-west-1"},
+		{u: "192.168.1.1", expectedRegion: ""},
+		{u: "s3-eu-west-1.amazonaws.com", expectedRegion: "eu-west-1"},
+		{u: "s3.eu-west-1.amazonaws.com", expectedRegion: "eu-west-1"},
+		{u: "s3.dualstack.eu-west-1.amazonaws.com", expectedRegion: "eu-west-1"},
+		{u: "s3.amazonaws.com", expectedRegion: ""},
+		{u: "s3-external-1.amazonaws.com", expectedRegion: ""},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.us-west-2.amazonaws.com", expectedRegion: ""},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com", expectedRegion: ""},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com.cn", expectedRegion: ""},
+		{u: "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "accesspoint.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "s3-fips.us-east-1.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "s3-fips.dualstack.us-west-1.amazonaws.com", expectedRegion: "us-west-1"},
+		{u: "s3express-usw2-az1.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+		{u: "s3express-use1-az5.us-east-1.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "s3express-apne1-az4.ap-northeast-1.amazonaws.com", expectedRegion: "ap-northeast-1"},
+		{u: "s3express-euc1-az2.eu-central-1.amazonaws.com", expectedRegion: "eu-central-1"},
+		{u: "s3express-usgw1-az3.us-gov-west-1.amazonaws.com", expectedRegion: "us-gov-west-1"},
+		{u: "s3express-usw2-az7.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+		{u: "s3express-usw2-lax1-az1.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+		// Dualstack variants.
+		{u: "s3express-control-dualstack.us-east-1.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "s3express-use1-az4.dualstack.us-east-1.amazonaws.com", expectedRegion: "us-east-1"},
+		{u: "s3express-usw2-lax1-az1.dualstack.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+		{u: "s3express-control.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+		// S3 on Outposts.
+		{u: "test-access-point-000000000000.op-00000000000000000.s3-outposts.eu-central-1.amazonaws.com", expectedRegion: "eu-central-1"},
+		{u: "myap-123456789012.op-0ab1c2d3e4f5.s3-outposts.us-west-2.amazonaws.com", expectedRegion: "us-west-2"},
+
+		// Test cases with port numbers.
+		{u: "storage.googleapis.com:80", expectedRegion: ""},
+		{u: "s3.cn-north-1.amazonaws.com.cn:80", expectedRegion: "cn-north-1"},
+		{u: "s3.dualstack.cn-north-1.amazonaws.com.cn:80", expectedRegion: "cn-north-1"},
+		{u: "s3.cn-northwest-1.amazonaws.com.cn:80", expectedRegion: "cn-northwest-1"},
+		{u: "s3.dualstack.cn-northwest-1.amazonaws.com.cn:80", expectedRegion: "cn-northwest-1"},
+		{u: "s3-fips-us-gov-west-1.amazonaws.com:80", expectedRegion: "us-gov-west-1"},
+		{u: "s3-fips.us-gov-west-1.amazonaws.com:80", expectedRegion: "us-gov-west-1"},
+		{u: "s3-fips.us-gov-east-1.amazonaws.com:80", expectedRegion: "us-gov-east-1"},
+		{u: "s3-us-gov-west-1.amazonaws.com:80", expectedRegion: "us-gov-west-1"},
+		{u: "s3-eu-west-1.amazonaws.com:80", expectedRegion: "eu-west-1"},
+		{u: "s3.eu-west-1.amazonaws.com:80", expectedRegion: "eu-west-1"},
+		{u: "s3.dualstack.eu-west-1.amazonaws.com:80", expectedRegion: "eu-west-1"},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.us-west-2.amazonaws.com:80", expectedRegion: ""},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com:80", expectedRegion: ""},
+		{u: "s3.kubernetesfrontendlb-caf78da2b1f7516c.elb.amazonaws.com.cn:80", expectedRegion: ""},
+		{u: "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com:80", expectedRegion: "us-east-1"},
+		{u: "accesspoint.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com:80", expectedRegion: "us-east-1"},
+		{u: "s3-fips.us-east-1.amazonaws.com:80", expectedRegion: "us-east-1"},
+		{u: "s3-fips.dualstack.us-west-1.amazonaws.com:80", expectedRegion: "us-west-1"},
+		// No region found.
+		{u: "192.168.1.1:80", expectedRegion: ""},
+		{u: "invalid-endpoint.com", expectedRegion: ""},
+		{u: "s3.amazonaws.com:80", expectedRegion: ""},
+		{u: "s3-external-1.amazonaws.com:80", expectedRegion: ""},
 	}
 
 	for i, testCase := range testCases {
-		region := GetRegionFromURL(testCase.u)
+		region := GetRegionFromURL(url.URL{Host: testCase.u})
 		if testCase.expectedRegion != region {
 			t.Errorf("Test %d: Expected region %s, got %s", i+1, testCase.expectedRegion, region)
 		}
@@ -165,7 +155,6 @@ func TestIsValidIP(t *testing.T) {
 			t.Errorf("Test %d: Expected isValidIP to be '%v' for input \"%s\", but found it to be '%v' instead", i+1, testCase.result, testCase.ip, result)
 		}
 	}
-
 }
 
 // Tests validate virtual host validator.
@@ -192,6 +181,32 @@ func TestIsVirtualHostSupported(t *testing.T) {
 		result := IsVirtualHostSupported(*u, testCase.bucket)
 		if testCase.result != result {
 			t.Errorf("Test %d: Expected isVirtualHostSupported to be '%v' for input url \"%s\" and bucket \"%s\", but found it to be '%v' instead", i+1, testCase.result, testCase.url, testCase.bucket, result)
+		}
+	}
+}
+
+// Tests validate S3 Outposts endpoint detector.
+func TestIsAmazonOutpostsEndpoint(t *testing.T) {
+	testCases := []struct {
+		url    string
+		result bool
+	}{
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.eu-west-1.amazonaws.com", false},
+		{"https://storage.googleapis.com", false},
+		{"https://test-access-point-000000000000.op-00000000000000000.s3-outposts.eu-central-1.amazonaws.com", true},
+		{"https://myap-123456789012.op-0ab1c2d3e4f5.s3-outposts.us-west-2.amazonaws.com", true},
+		{"https://accesspoint-account.op-outpostid.s3-outposts.eu-north-1.amazonaws.com", true},
+	}
+	for i, testCase := range testCases {
+		u, err := url.Parse(testCase.url)
+		if err != nil {
+			t.Errorf("Test %d: url.Parse failed: %v", i+1, err)
+			continue
+		}
+		got := IsAmazonOutpostsEndpoint(*u)
+		if got != testCase.result {
+			t.Errorf("Test %d: IsAmazonOutpostsEndpoint(%q) = %v, want %v", i+1, testCase.url, got, testCase.result)
 		}
 	}
 }
@@ -223,6 +238,11 @@ func TestIsAmazonEndpoint(t *testing.T) {
 		{"https://s3-us-west-1.amazonaws.com", true},
 		{"https://s3.us-west-1.amazonaws.com", true},
 		{"https://s3.dualstack.us-west-1.amazonaws.com", true},
+		{"https://bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", true},
+		{"https://accesspoint.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", true},
+		{"https://s3express-usw2-az1.us-west-2.amazonaws.com", true},
+		{"https://s3express-control-dualstack.us-east-1.amazonaws.com", true},
+		{"https://s3express-use1-az4.dualstack.us-east-1.amazonaws.com", true},
 	}
 
 	for i, testCase := range testCases {
@@ -235,7 +255,6 @@ func TestIsAmazonEndpoint(t *testing.T) {
 			t.Errorf("Test %d: Expected isAmazonEndpoint to be '%v' for input \"%s\", but found it to be '%v' instead", i+1, testCase.result, testCase.url, result)
 		}
 	}
-
 }
 
 // Tests validate Google Cloud end point validator.
@@ -256,6 +275,8 @@ func TestIsGoogleEndpoint(t *testing.T) {
 		// valid inputs.
 		{"http://storage.googleapis.com", true},
 		{"https://storage.googleapis.com", true},
+		{"http://storage.googleapis.com:80", true},
+		{"https://storage.googleapis.com:443", true},
 	}
 
 	for i, testCase := range testCases {
@@ -268,7 +289,6 @@ func TestIsGoogleEndpoint(t *testing.T) {
 			t.Errorf("Test %d: Expected isGoogleEndpoint to be '%v' for input \"%s\", but found it to be '%v' instead", i+1, testCase.result, testCase.url, result)
 		}
 	}
-
 }
 
 func TestPercentEncodeSlash(t *testing.T) {
@@ -291,7 +311,6 @@ func TestPercentEncodeSlash(t *testing.T) {
 				i+1, testCase.input, testCase.output,
 				receivedOutput,
 			)
-
 		}
 	}
 }
@@ -322,81 +341,6 @@ func TestQueryEncode(t *testing.T) {
 		if testCase.result != result {
 			t.Errorf("Test %d: Expected queryEncode result to be \"%s\", but found it to be \"%s\" instead", i+1, testCase.result, result)
 		}
-	}
-}
-
-// Tests tag decode to map
-func TestTagDecode(t *testing.T) {
-	testCases := []struct {
-		// canonical input
-		canonicalInput string
-
-		// Expected result.
-		resultMap map[string]string
-	}{
-		{"k=thisisthe%25url", map[string]string{"k": "thisisthe%url"}},
-		{"k=%E6%9C%AC%E8%AA%9E", map[string]string{"k": "本語"}},
-		{"k=%E6%9C%AC%E8%AA%9E.1", map[string]string{"k": "本語.1"}},
-		{"k=%3E123", map[string]string{"k": ">123"}},
-		{"k=myurl%23link", map[string]string{"k": "myurl#link"}},
-		{"k=space%20in%20url", map[string]string{"k": "space in url"}},
-		{"k=url%2Bpath", map[string]string{"k": "url+path"}},
-		{"k=url%2Fpath", map[string]string{"k": "url/path"}},
-	}
-
-	for _, testCase := range testCases {
-		testCase := testCase
-		t.Run("", func(t *testing.T) {
-			gotResult := TagDecode(testCase.canonicalInput)
-			if !reflect.DeepEqual(testCase.resultMap, gotResult) {
-				t.Errorf("Expected %s, got %s", testCase.resultMap, gotResult)
-			}
-		})
-	}
-}
-
-// Tests tag encode function for user tags.
-func TestTagEncode(t *testing.T) {
-	testCases := []struct {
-		// Input.
-		inputMap map[string]string
-		// Expected result.
-		result string
-	}{
-		{map[string]string{
-			"k": "thisisthe%url",
-		}, "k=thisisthe%25url"},
-		{map[string]string{
-			"k": "本語",
-		}, "k=%E6%9C%AC%E8%AA%9E"},
-		{map[string]string{
-			"k": "本語.1",
-		}, "k=%E6%9C%AC%E8%AA%9E.1"},
-		{map[string]string{
-			"k": ">123",
-		}, "k=%3E123"},
-		{map[string]string{
-			"k": "myurl#link",
-		}, "k=myurl%23link"},
-		{map[string]string{
-			"k": "space in url",
-		}, "k=space%20in%20url"},
-		{map[string]string{
-			"k": "url+path",
-		}, "k=url%2Bpath"},
-		{map[string]string{
-			"k": "url/path",
-		}, "k=url%2Fpath"},
-	}
-
-	for _, testCase := range testCases {
-		testCase := testCase
-		t.Run("", func(t *testing.T) {
-			gotResult := TagEncode(testCase.inputMap)
-			if testCase.result != gotResult {
-				t.Errorf("Expected %s, got %s", testCase.result, gotResult)
-			}
-		})
 	}
 }
 
@@ -447,6 +391,9 @@ func TestIsValidBucketName(t *testing.T) {
 		{"192.168.1.168", errors.New("Bucket name cannot be an ip address"), false},
 		{":bucketname", errors.New("Bucket name contains invalid characters"), false},
 		{"_bucketName", errors.New("Bucket name contains invalid characters"), false},
+		{"/mybucket", errors.New("Bucket name cannot contain path separators"), false},
+		{"mybucket/myobject", errors.New("Bucket name cannot contain path separators"), false},
+		{"..", errors.New("Bucket name cannot be a relative path element"), false},
 		{"my.bucket.com", nil, true},
 		{"my-bucket", nil, true},
 		{"123my-bucket", nil, true},
@@ -469,9 +416,7 @@ func TestIsValidBucketName(t *testing.T) {
 				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err.Error(), err.Error())
 			}
 		}
-
 	}
-
 }
 
 // Tests validate the bucket name validator stricter.
@@ -494,6 +439,24 @@ func TestIsValidBucketNameStrict(t *testing.T) {
 		{"my-.bucket", errors.New("Bucket name contains invalid characters"), false},
 		{"192.168.1.168", errors.New("Bucket name cannot be an ip address"), false},
 		{"Mybucket", errors.New("Bucket name contains invalid characters"), false},
+		// Request paths that hid the bucket behind a leading "//" reach here
+		// verbatim, so every path-shaped spelling has to be rejected as a path.
+		{"/mybucket", errors.New("Bucket name cannot contain path separators"), false},
+		{"//mybucket", errors.New("Bucket name cannot contain path separators"), false},
+		{"mybucket/myobject", errors.New("Bucket name cannot contain path separators"), false},
+		{"//", errors.New("Bucket name cannot contain path separators"), false},
+		{"/", errors.New("Bucket name cannot contain path separators"), false},
+		{"../", errors.New("Bucket name cannot contain path separators"), false},
+		{"/..", errors.New("Bucket name cannot contain path separators"), false},
+		{"/.", errors.New("Bucket name cannot contain path separators"), false},
+		{"./mybucket", errors.New("Bucket name cannot contain path separators"), false},
+		{"mybucket/", errors.New("Bucket name cannot contain path separators"), false},
+		{`\mybucket`, errors.New("Bucket name cannot contain path separators"), false},
+		{".", errors.New("Bucket name cannot be a relative path element"), false},
+		{"..", errors.New("Bucket name cannot be a relative path element"), false},
+		// A path-shaped name is diagnosed as a path even when it also busts
+		// the length limit - the oversized scanner probe that motivated this.
+		{"//" + strings.Repeat("a", 300), errors.New("Bucket name cannot contain path separators"), false},
 		{"my.bucket.com", nil, true},
 		{"my-bucket", nil, true},
 		{"123my-bucket", nil, true},
@@ -513,7 +476,78 @@ func TestIsValidBucketNameStrict(t *testing.T) {
 				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err.Error(), err.Error())
 			}
 		}
+	}
+}
 
+func TestIsAmazonPrivateLinkEndpoint(t *testing.T) {
+	testCases := []struct {
+		url string
+		// Expected result.
+		result bool
+	}{
+		{"https://192.168.1.1", false},
+		{"192.168.1.1", false},
+		{"http://storage.googleapis.com", false},
+		{"https://storage.googleapis.com", false},
+		{"storage.googleapis.com", false},
+		{"s3.amazonaws.com", false},
+		{"https://amazons3.amazonaws.com", false},
+		{"-192.168.1.1", false},
+		{"260.192.1.1", false},
+		{"https://s3-.amazonaws.com", false},
+		{"https://s3..amazonaws.com", false},
+		{"https://s3.dualstack.us-west-1.amazonaws.com.cn", false},
+		{"https://s3..us-west-1.amazonaws.com.cn", false},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3-external-1.amazonaws.com", false},
+		{"https://s3.cn-north-1.amazonaws.com.cn", false},
+		{"https://s3-us-west-1.amazonaws.com", false},
+		{"https://s3.us-west-1.amazonaws.com", false},
+		{"https://s3.dualstack.us-west-1.amazonaws.com", false},
+		// valid inputs.
+		{"https://bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", true},
+		{"https://accesspoint.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com", true},
+		{"https://bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com:443", true},
+		{"https://accesspoint.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com:443", true},
 	}
 
+	for i, testCase := range testCases {
+		u, err := url.Parse(testCase.url)
+		if err != nil {
+			t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err)
+		}
+		result := IsAmazonPrivateLinkEndpoint(*u)
+		if testCase.result != result {
+			t.Errorf("Test %d: Expected IsAmazonPrivateLinkEndpoint to be '%v' for input \"%s\", but found it to be '%v' instead", i+1, testCase.result, testCase.url, result)
+		}
+	}
+}
+
+func TestS3ExpressBucket(t *testing.T) {
+	tests := []struct {
+		bucket  string
+		wantErr bool
+	}{
+		{"my-express-bucket--usw2-az1--x-s3", true},
+		{"ml-training--apne1-az4--x-s3", true},
+		{"my-bucket--usw2-lax1-az1--x-s3", true},
+		{"my-standard-bucket", false},
+		{"my-express-bucket--usw2-az1", false},
+		// Periods are not allowed in directory bucket names.
+		{"data.analytics--use1-az5--x-s3", false},
+		{"192.168.0.1--usw2-az1--x-s3", false},
+		{"my..bucket--usw2-az1--x-s3", false},
+		{"my--bucket--usw2-az1--x-s3", false},
+		{".mybucket--usw2-az1--x-s3", false},
+		{"my-bucket--invalid-azX--x-s3", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.bucket, func(t *testing.T) {
+			got := IsS3ExpressBucket(tt.bucket)
+			if got != tt.wantErr {
+				t.Errorf("IsS3ExpressBucket(%q) = %v, want %v", tt.bucket, got, tt.wantErr)
+			}
+		})
+	}
 }

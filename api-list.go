@@ -20,8 +20,11 @@ package minio
 import (
 	"context"
 	"fmt"
+	"iter"
 	"net/http"
 	"net/url"
+	"slices"
+	"time"
 
 	"github.com/minio/minio-go/v7/pkg/s3utils"
 )
@@ -31,11 +34,10 @@ import (
 // This call requires explicit authentication, no anonymous requests are
 // allowed for listing buckets.
 //
-//   api := client.New(....)
-//   for message := range api.ListBuckets(context.Background()) {
-//       fmt.Println(message)
-//   }
-//
+//	api := client.New(....)
+//	for message := range api.ListBuckets(context.Background()) {
+//	    fmt.Println(message)
+//	}
 func (c *Client) ListBuckets(ctx context.Context) ([]BucketInfo, error) {
 	// Execute GET on service.
 	resp, err := c.executeMethod(ctx, http.MethodGet, requestMetadata{contentSHA256Hex: emptySHA256Hex})
@@ -56,10 +58,66 @@ func (c *Client) ListBuckets(ctx context.Context) ([]BucketInfo, error) {
 	return listAllMyBucketsResult.Buckets.Bucket, nil
 }
 
+// ListDirectoryBuckets list all buckets owned by this authenticated user.
+//
+// This call requires explicit authentication, no anonymous requests are
+// allowed for listing buckets.
+//
+// api := client.New(....)
+// dirBuckets, err := api.ListDirectoryBuckets(context.Background())
+func (c *Client) ListDirectoryBuckets(ctx context.Context) (iter.Seq2[BucketInfo, error], error) {
+	fetchBuckets := func(continuationToken string) ([]BucketInfo, string, error) {
+		metadata := requestMetadata{contentSHA256Hex: emptySHA256Hex}
+		metadata.queryValues = url.Values{}
+		metadata.queryValues.Set("max-directory-buckets", "1000")
+		if continuationToken != "" {
+			metadata.queryValues.Set("continuation-token", continuationToken)
+		}
+
+		// Execute GET on service.
+		resp, err := c.executeMethod(ctx, http.MethodGet, metadata)
+		defer closeResponse(resp)
+		if err != nil {
+			return nil, "", err
+		}
+		if resp != nil {
+			if resp.StatusCode != http.StatusOK {
+				return nil, "", httpRespToErrorResponse(resp, "", "")
+			}
+		}
+
+		results := listAllMyDirectoryBucketsResult{}
+		if err = xmlDecoder(resp.Body, &results); err != nil {
+			return nil, "", err
+		}
+
+		return results.Buckets.Bucket, results.ContinuationToken, nil
+	}
+
+	return func(yield func(BucketInfo, error) bool) {
+		var continuationToken string
+		for {
+			buckets, token, err := fetchBuckets(continuationToken)
+			if err != nil {
+				yield(BucketInfo{}, err)
+				return
+			}
+			for _, bucket := range buckets {
+				if !yield(bucket, nil) {
+					return
+				}
+			}
+			if token == "" {
+				// nothing to continue
+				return
+			}
+			continuationToken = token
+		}
+	}, nil
+}
+
 // Bucket List Operations.
-func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts ListObjectsOptions) <-chan ObjectInfo {
-	// Allocate new list objects channel.
-	objectStatCh := make(chan ObjectInfo, 1)
+func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts ListObjectsOptions) iter.Seq[ObjectInfo] {
 	// Default listing is delimited at "/"
 	delimiter := "/"
 	if opts.Recursive {
@@ -69,49 +127,46 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 
 	// Return object owner information by default
 	fetchOwner := true
-
-	// Validate bucket name.
-	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
-		defer close(objectStatCh)
-		objectStatCh <- ObjectInfo{
-			Err: err,
-		}
-		return objectStatCh
+	if opts.FetchOwner != nil {
+		fetchOwner = *opts.FetchOwner
 	}
 
-	// Validate incoming object prefix.
-	if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
-		defer close(objectStatCh)
-		objectStatCh <- ObjectInfo{
-			Err: err,
+	return func(yield func(ObjectInfo) bool) {
+		if contextCanceled(ctx) {
+			return
 		}
-		return objectStatCh
-	}
 
-	// Initiate list objects goroutine here.
-	go func(objectStatCh chan<- ObjectInfo) {
-		defer close(objectStatCh)
+		// Validate bucket name.
+		if err := s3utils.CheckValidBucketName(bucketName); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
+		}
+
+		// Validate incoming object prefix.
+		if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
+		}
+
 		// Save continuationToken for next request.
 		var continuationToken string
 		for {
+			if contextCanceled(ctx) {
+				return
+			}
+
 			// Get list of objects a maximum of 1000 per request.
 			result, err := c.listObjectsV2Query(ctx, bucketName, opts.Prefix, continuationToken,
-				fetchOwner, opts.WithMetadata, delimiter, opts.StartAfter, opts.MaxKeys, opts.headers)
+				fetchOwner, opts.WithMetadata, opts.Unsorted, delimiter, opts.StartAfter, opts.MaxKeys, opts.requestHeaders())
 			if err != nil {
-				objectStatCh <- ObjectInfo{
-					Err: err,
-				}
+				yield(ObjectInfo{Err: err})
 				return
 			}
 
 			// If contents are available loop through and send over channel.
 			for _, object := range result.Contents {
 				object.ETag = trimEtag(object.ETag)
-				select {
-				// Send object content.
-				case objectStatCh <- object:
-				// If receives done from the caller, return here.
-				case <-ctx.Done():
+				if !yield(object) {
 					return
 				}
 			}
@@ -119,11 +174,7 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 			// Send all common prefixes if any.
 			// NOTE: prefixes are only present if the request is delimited.
 			for _, obj := range result.CommonPrefixes {
-				select {
-				// Send object prefixes.
-				case objectStatCh <- ObjectInfo{Key: obj.Prefix}:
-				// If receives done from the caller, return here.
-				case <-ctx.Done():
+				if !yield(ObjectInfo{Key: obj.Prefix}) {
 					return
 				}
 			}
@@ -137,9 +188,17 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 			if !result.IsTruncated {
 				return
 			}
+
+			// Add this to catch broken S3 API implementations.
+			if continuationToken == "" {
+				if !yield(ObjectInfo{
+					Err: fmt.Errorf("listObjectsV2 is truncated without continuationToken, %s S3 server is buggy", c.endpointURL),
+				}) {
+					return
+				}
+			}
 		}
-	}(objectStatCh)
-	return objectStatCh
+	}
 }
 
 // listObjectsV2Query - (List Objects V2) - List some or all (up to 1000) of the objects in a bucket.
@@ -150,10 +209,11 @@ func (c *Client) listObjectsV2(ctx context.Context, bucketName string, opts List
 // ?prefix - Limits the response to keys that begin with the specified prefix.
 // ?continuation-token - Used to continue iterating over a set of objects
 // ?metadata - Specifies if we want metadata for the objects as part of list operation.
+// ?unsorted - Specifies that the objects may be returned in any order, MinIO extension.
 // ?delimiter - A delimiter is a character you use to group keys.
 // ?start-after - Sets a marker to start listing lexically at this key onwards.
 // ?max-keys - Sets the maximum number of keys returned in the response body.
-func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefix, continuationToken string, fetchOwner, metadata bool, delimiter string, startAfter string, maxkeys int, headers http.Header) (ListBucketV2Result, error) {
+func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefix, continuationToken string, fetchOwner, metadata, unsorted bool, delimiter, startAfter string, maxkeys int, headers http.Header) (ListBucketV2Result, error) {
 	// Validate bucket name.
 	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
 		return ListBucketV2Result{}, err
@@ -171,6 +231,10 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 
 	if metadata {
 		urlValues.Set("metadata", "true")
+	}
+
+	if unsorted {
+		urlValues.Set("unsorted", "true")
 	}
 
 	// Set this conditionally if asked
@@ -229,7 +293,7 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	// sure proper responses are received.
 	if listBucketResult.IsTruncated && listBucketResult.NextContinuationToken == "" {
 		return listBucketResult, ErrorResponse{
-			Code:    "NotImplemented",
+			Code:    NotImplemented,
 			Message: "Truncated response should have continuation token set",
 		}
 	}
@@ -239,6 +303,9 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 		if err != nil {
 			return listBucketResult, err
 		}
+		listBucketResult.Contents[i].LastModified = listBucketResult.Contents[i].LastModified.Truncate(time.Millisecond)
+		listBucketResult.Contents[i].UserMetadataStripped = stripUserMetadata(obj.UserMetadata)
+		listBucketResult.Contents[i].setChecksumAlgorithm()
 	}
 
 	for i, obj := range listBucketResult.CommonPrefixes {
@@ -252,44 +319,41 @@ func (c *Client) listObjectsV2Query(ctx context.Context, bucketName, objectPrefi
 	return listBucketResult, nil
 }
 
-func (c *Client) listObjects(ctx context.Context, bucketName string, opts ListObjectsOptions) <-chan ObjectInfo {
-	// Allocate new list objects channel.
-	objectStatCh := make(chan ObjectInfo, 1)
+func (c *Client) listObjects(ctx context.Context, bucketName string, opts ListObjectsOptions) iter.Seq[ObjectInfo] {
 	// Default listing is delimited at "/"
 	delimiter := "/"
 	if opts.Recursive {
 		// If recursive we do not delimit.
 		delimiter = ""
 	}
-	// Validate bucket name.
-	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
-		defer close(objectStatCh)
-		objectStatCh <- ObjectInfo{
-			Err: err,
-		}
-		return objectStatCh
-	}
-	// Validate incoming object prefix.
-	if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
-		defer close(objectStatCh)
-		objectStatCh <- ObjectInfo{
-			Err: err,
-		}
-		return objectStatCh
-	}
 
-	// Initiate list objects goroutine here.
-	go func(objectStatCh chan<- ObjectInfo) {
-		defer close(objectStatCh)
+	return func(yield func(ObjectInfo) bool) {
+		if contextCanceled(ctx) {
+			return
+		}
+
+		// Validate bucket name.
+		if err := s3utils.CheckValidBucketName(bucketName); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
+		}
+
+		// Validate incoming object prefix.
+		if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
+		}
 
 		marker := opts.StartAfter
 		for {
+			if contextCanceled(ctx) {
+				return
+			}
+
 			// Get list of objects a maximum of 1000 per request.
-			result, err := c.listObjectsQuery(ctx, bucketName, opts.Prefix, marker, delimiter, opts.MaxKeys, opts.headers)
+			result, err := c.listObjectsQuery(ctx, bucketName, opts.Prefix, marker, delimiter, opts.MaxKeys, opts.requestHeaders())
 			if err != nil {
-				objectStatCh <- ObjectInfo{
-					Err: err,
-				}
+				yield(ObjectInfo{Err: err})
 				return
 			}
 
@@ -297,11 +361,8 @@ func (c *Client) listObjects(ctx context.Context, bucketName string, opts ListOb
 			for _, object := range result.Contents {
 				// Save the marker.
 				marker = object.Key
-				select {
-				// Send object content.
-				case objectStatCh <- object:
-				// If receives done from the caller, return here.
-				case <-ctx.Done():
+				object.ETag = trimEtag(object.ETag)
+				if !yield(object) {
 					return
 				}
 			}
@@ -309,11 +370,7 @@ func (c *Client) listObjects(ctx context.Context, bucketName string, opts ListOb
 			// Send all common prefixes if any.
 			// NOTE: prefixes are only present if the request is delimited.
 			for _, obj := range result.CommonPrefixes {
-				select {
-				// Send object prefixes.
-				case objectStatCh <- ObjectInfo{Key: obj.Prefix}:
-				// If receives done from the caller, return here.
-				case <-ctx.Done():
+				if !yield(ObjectInfo{Key: obj.Prefix}) {
 					return
 				}
 			}
@@ -328,13 +385,10 @@ func (c *Client) listObjects(ctx context.Context, bucketName string, opts ListOb
 				return
 			}
 		}
-	}(objectStatCh)
-	return objectStatCh
+	}
 }
 
-func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts ListObjectsOptions) <-chan ObjectInfo {
-	// Allocate new list objects channel.
-	resultCh := make(chan ObjectInfo, 1)
+func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts ListObjectsOptions) iter.Seq[ObjectInfo] {
 	// Default listing is delimited at "/"
 	delimiter := "/"
 	if opts.Recursive {
@@ -342,61 +396,109 @@ func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts
 		delimiter = ""
 	}
 
-	// Validate bucket name.
-	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
-		defer close(resultCh)
-		resultCh <- ObjectInfo{
-			Err: err,
+	return func(yield func(ObjectInfo) bool) {
+		if contextCanceled(ctx) {
+			return
 		}
-		return resultCh
-	}
 
-	// Validate incoming object prefix.
-	if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
-		defer close(resultCh)
-		resultCh <- ObjectInfo{
-			Err: err,
+		// Validate bucket name.
+		if err := s3utils.CheckValidBucketName(bucketName); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
 		}
-		return resultCh
-	}
 
-	// Initiate list objects goroutine here.
-	go func(resultCh chan<- ObjectInfo) {
-		defer close(resultCh)
+		// Validate incoming object prefix.
+		if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
+			yield(ObjectInfo{Err: err})
+			return
+		}
 
 		var (
-			keyMarker       = ""
+			keyMarker       = opts.StartAfter
 			versionIDMarker = ""
+			preName         = ""
+			preKey          = ""
+			perVersions     []Version
+			numVersions     int
 		)
 
-		for {
-			// Get list of objects a maximum of 1000 per request.
-			result, err := c.listObjectVersionsQuery(ctx, bucketName, opts.Prefix, keyMarker, versionIDMarker, delimiter, opts.MaxKeys, opts.headers)
-			if err != nil {
-				resultCh <- ObjectInfo{
-					Err: err,
+		send := func(vers []Version) bool {
+			if opts.WithVersions && opts.ReverseVersions {
+				slices.Reverse(vers)
+				numVersions = len(vers)
+			}
+			for _, version := range vers {
+				info := ObjectInfo{
+					ETag:                 trimEtag(version.ETag),
+					Key:                  version.Key,
+					LastModified:         version.LastModified.Truncate(time.Millisecond),
+					Size:                 version.Size,
+					Owner:                version.Owner,
+					StorageClass:         version.StorageClass,
+					IsLatest:             version.IsLatest,
+					VersionID:            version.VersionID,
+					IsDeleteMarker:       version.isDeleteMarker,
+					UserTags:             version.UserTags,
+					UserMetadata:         version.UserMetadata,
+					UserMetadataStripped: version.UserMetadataStripped,
+					Internal:             version.Internal,
+					Restore:              version.Restore,
+					NumVersions:          numVersions,
+					ChecksumAlgorithm:    version.ChecksumAlgorithm,
+					ChecksumMode:         version.ChecksumType,
+					ChecksumCRC32:        version.ChecksumCRC32,
+					ChecksumCRC32C:       version.ChecksumCRC32C,
+					ChecksumSHA1:         version.ChecksumSHA1,
+					ChecksumSHA256:       version.ChecksumSHA256,
+					ChecksumCRC64NVME:    version.ChecksumCRC64NVME,
+					ChecksumMD5:          version.ChecksumMD5,
+					ChecksumSHA512:       version.ChecksumSHA512,
+					ChecksumXXHash64:     version.ChecksumXXHash64,
+					ChecksumXXHash3:      version.ChecksumXXHash3,
+					ChecksumXXHash128:    version.ChecksumXXHash128,
 				}
+				info.setChecksumAlgorithm()
+				if !yield(info) {
+					return false
+				}
+			}
+			return true
+		}
+		for {
+			if contextCanceled(ctx) {
 				return
 			}
 
-			// If contents are available loop through and send over channel.
-			for _, version := range result.Versions {
-				info := ObjectInfo{
-					ETag:           trimEtag(version.ETag),
-					Key:            version.Key,
-					LastModified:   version.LastModified,
-					Size:           version.Size,
-					Owner:          version.Owner,
-					StorageClass:   version.StorageClass,
-					IsLatest:       version.IsLatest,
-					VersionID:      version.VersionID,
-					IsDeleteMarker: version.isDeleteMarker,
+			// Get list of objects a maximum of 1000 per request.
+			result, err := c.listObjectVersionsQuery(ctx, bucketName, opts, keyMarker, versionIDMarker, delimiter)
+			if err != nil {
+				yield(ObjectInfo{Err: err})
+				return
+			}
+
+			if opts.WithVersions && opts.ReverseVersions {
+				for _, version := range result.Versions {
+					if preName == "" {
+						preName = result.Name
+						preKey = version.Key
+					}
+					if result.Name == preName && preKey == version.Key {
+						// If the current name is same as previous name,
+						// we need to append the version to the previous version.
+						perVersions = append(perVersions, version)
+						continue
+					}
+					// Send the file versions.
+					if !send(perVersions) {
+						return
+					}
+					perVersions = perVersions[:0]
+					perVersions = append(perVersions, version)
+					preName = result.Name
+					preKey = version.Key
 				}
-				select {
-				// Send object version info.
-				case resultCh <- info:
-					// If receives done from the caller, return here.
-				case <-ctx.Done():
+			} else {
+				if !send(result.Versions) {
 					return
 				}
 			}
@@ -404,11 +506,7 @@ func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts
 			// Send all common prefixes if any.
 			// NOTE: prefixes are only present if the request is delimited.
 			for _, obj := range result.CommonPrefixes {
-				select {
-				// Send object prefixes.
-				case resultCh <- ObjectInfo{Key: obj.Prefix}:
-				// If receives done from the caller, return here.
-				case <-ctx.Done():
+				if !yield(ObjectInfo{Key: obj.Prefix}) {
 					return
 				}
 			}
@@ -425,11 +523,16 @@ func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts
 
 			// Listing ends result is not truncated, return right here.
 			if !result.IsTruncated {
+				// sent the lasted file with versions
+				if opts.ReverseVersions && len(perVersions) > 0 {
+					if !send(perVersions) {
+						return
+					}
+				}
 				return
 			}
 		}
-	}(resultCh)
-	return resultCh
+	}
 }
 
 // listObjectVersions - (List Object Versions) - List some or all (up to 1000) of the existing objects
@@ -443,13 +546,13 @@ func (c *Client) listObjectVersions(ctx context.Context, bucketName string, opts
 // ?delimiter - A delimiter is a character you use to group keys.
 // ?prefix - Limits the response to keys that begin with the specified prefix.
 // ?max-keys - Sets the maximum number of keys returned in the response body.
-func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName, prefix, keyMarker, versionIDMarker, delimiter string, maxkeys int, headers http.Header) (ListVersionsResult, error) {
+func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName string, opts ListObjectsOptions, keyMarker, versionIDMarker, delimiter string) (ListVersionsResult, error) {
 	// Validate bucket name.
 	if err := s3utils.CheckValidBucketName(bucketName); err != nil {
 		return ListVersionsResult{}, err
 	}
 	// Validate object prefix.
-	if err := s3utils.CheckValidObjectNamePrefix(prefix); err != nil {
+	if err := s3utils.CheckValidObjectNamePrefix(opts.Prefix); err != nil {
 		return ListVersionsResult{}, err
 	}
 	// Get resources properly escaped and lined up before
@@ -460,7 +563,7 @@ func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName, prefix
 	urlValues.Set("versions", "")
 
 	// Set object prefix, prefix value to be set to empty is okay.
-	urlValues.Set("prefix", prefix)
+	urlValues.Set("prefix", opts.Prefix)
 
 	// Set delimiter, delimiter value to be set to empty is okay.
 	urlValues.Set("delimiter", delimiter)
@@ -471,13 +574,17 @@ func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName, prefix
 	}
 
 	// Set max keys.
-	if maxkeys > 0 {
-		urlValues.Set("max-keys", fmt.Sprintf("%d", maxkeys))
+	if opts.MaxKeys > 0 {
+		urlValues.Set("max-keys", fmt.Sprintf("%d", opts.MaxKeys))
 	}
 
 	// Set version ID marker
 	if versionIDMarker != "" {
 		urlValues.Set("version-id-marker", versionIDMarker)
+	}
+
+	if opts.WithMetadata {
+		urlValues.Set("metadata", "true")
 	}
 
 	// Always set encoding-type
@@ -488,7 +595,7 @@ func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName, prefix
 		bucketName:       bucketName,
 		queryValues:      urlValues,
 		contentSHA256Hex: emptySHA256Hex,
-		customHeader:     headers,
+		customHeader:     opts.requestHeaders(),
 	})
 	defer closeResponse(resp)
 	if err != nil {
@@ -512,6 +619,7 @@ func (c *Client) listObjectVersionsQuery(ctx context.Context, bucketName, prefix
 		if err != nil {
 			return listObjectVersionsOutput, err
 		}
+		listObjectVersionsOutput.Versions[i].UserMetadataStripped = stripUserMetadata(obj.UserMetadata)
 	}
 
 	for i, obj := range listObjectVersionsOutput.CommonPrefixes {
@@ -600,6 +708,8 @@ func (c *Client) listObjectsQuery(ctx context.Context, bucketName, objectPrefix,
 		if err != nil {
 			return listBucketResult, err
 		}
+		listBucketResult.Contents[i].LastModified = listBucketResult.Contents[i].LastModified.Truncate(time.Millisecond)
+		listBucketResult.Contents[i].setChecksumAlgorithm()
 	}
 
 	for i, obj := range listBucketResult.CommonPrefixes {
@@ -621,10 +731,21 @@ func (c *Client) listObjectsQuery(ctx context.Context, bucketName, objectPrefix,
 
 // ListObjectsOptions holds all options of a list object request
 type ListObjectsOptions struct {
+	// ReverseVersions - reverse the order of the object versions
+	ReverseVersions bool
 	// Include objects versions in the listing
 	WithVersions bool
 	// Include objects metadata in the listing
 	WithMetadata bool
+	// Include the restore state of archived objects in the listing, as
+	// ObjectInfo.Restore. Ignored by servers that do not implement the
+	// x-amz-optional-object-attributes header.
+	WithRestoreStatus bool
+	// Unsorted allows the server to return the objects in any order, only
+	// honored by ListObjects V2 and incompatible with StartAfter. This is
+	// a MinIO extension, other S3 providers ignore it and keep returning a
+	// sorted listing. See ListUnsorted for the full semantics.
+	Unsorted bool
 	// Only list objects with the prefix
 	Prefix string
 	// Ignore '/' delimiter
@@ -641,7 +762,42 @@ type ListObjectsOptions struct {
 	// Use the deprecated list objects V1 API
 	UseV1 bool
 
+	// FetchOwner indicates whether to return object owner information.
+	// It defaults to true when unset.
+	FetchOwner *bool
+
 	headers http.Header
+}
+
+// checkUnsorted returns an error if the unsorted listing extension cannot be
+// honored for these options against a bucket in the given location. It is only
+// implemented by ListObjects V2, and its continuation token encodes a position
+// rather than a key, so there is nothing for 'StartAfter' to resolve against.
+func (o ListObjectsOptions) checkUnsorted(location string) error {
+	if !o.Unsorted {
+		return nil
+	}
+	if o.UseV1 || o.WithVersions || location == "snowball" {
+		return errInvalidArgument("unsorted listing is only supported by ListObjects V2")
+	}
+	if o.StartAfter != "" {
+		return errInvalidArgument("unsorted listing does not support StartAfter")
+	}
+	return nil
+}
+
+// requestHeaders returns the headers to send with a listing request, the
+// caller supplied ones plus the optional attributes the options ask for.
+func (o ListObjectsOptions) requestHeaders() http.Header {
+	if !o.WithRestoreStatus {
+		return o.headers
+	}
+	headers := o.headers.Clone()
+	if headers == nil {
+		headers = make(http.Header, 1)
+	}
+	headers.Set(amzOptionalObjectAttributes, restoreStatusAttribute)
+	return headers
 }
 
 // Set adds a key value pair to the options. The
@@ -656,12 +812,77 @@ func (o *ListObjectsOptions) Set(key, value string) {
 
 // ListObjects returns objects list after evaluating the passed options.
 //
-//   api := client.New(....)
-//   for object := range api.ListObjects(ctx, "mytestbucket", minio.ListObjectsOptions{Prefix: "starthere", Recursive:true}) {
-//       fmt.Println(object)
-//   }
+//	api := client.New(....)
+//	for object := range api.ListObjects(ctx, "mytestbucket", minio.ListObjectsOptions{Prefix: "starthere", Recursive:true}) {
+//	    fmt.Println(object)
+//	}
 //
+// If caller cancels the context, then the last entry on the 'chan ObjectInfo' will be the context.Error()
+// caller must drain the channel entirely and wait until channel is closed before proceeding, without
+// waiting on the channel to be closed completely you might leak goroutines.
 func (c *Client) ListObjects(ctx context.Context, bucketName string, opts ListObjectsOptions) <-chan ObjectInfo {
+	objectStatCh := make(chan ObjectInfo, 1)
+	go func() {
+		defer close(objectStatCh)
+		if contextCanceled(ctx) {
+			objectStatCh <- ObjectInfo{Err: ctx.Err()}
+			return
+		}
+
+		location, _ := c.bucketLocCache.Get(bucketName)
+		if err := opts.checkUnsorted(location); err != nil {
+			objectStatCh <- ObjectInfo{Err: err}
+			return
+		}
+
+		var objIter iter.Seq[ObjectInfo]
+		switch {
+		case opts.WithVersions:
+			objIter = c.listObjectVersions(ctx, bucketName, opts)
+		case opts.UseV1:
+			objIter = c.listObjects(ctx, bucketName, opts)
+		default:
+			if location == "snowball" {
+				objIter = c.listObjects(ctx, bucketName, opts)
+			} else {
+				objIter = c.listObjectsV2(ctx, bucketName, opts)
+			}
+		}
+		for obj := range objIter {
+			select {
+			case <-ctx.Done():
+				objectStatCh <- ObjectInfo{Err: ctx.Err()}
+				return
+			case objectStatCh <- obj:
+			}
+		}
+	}()
+	return objectStatCh
+}
+
+// ListObjectsIter returns object list as a iterator sequence.
+// caller must cancel the context if they are not interested in
+// iterating further, if no more entries the iterator will
+// automatically stop.
+//
+//	api := client.New(....)
+//	for object := range api.ListObjectsIter(ctx, "mytestbucket", minio.ListObjectsOptions{Prefix: "starthere", Recursive:true}) {
+//	    if object.Err != nil {
+//	        // handle the errors.
+//	    }
+//	    fmt.Println(object)
+//	}
+//
+// Canceling the context the iterator will stop, if you wish to discard the yielding make sure
+// to cancel the passed context without that you might leak coroutines
+func (c *Client) ListObjectsIter(ctx context.Context, bucketName string, opts ListObjectsOptions) iter.Seq[ObjectInfo] {
+	location, _ := c.bucketLocCache.Get(bucketName)
+	if err := opts.checkUnsorted(location); err != nil {
+		return func(yield func(ObjectInfo) bool) {
+			yield(ObjectInfo{Err: err})
+		}
+	}
+
 	if opts.WithVersions {
 		return c.listObjectVersions(ctx, bucketName, opts)
 	}
@@ -672,13 +893,40 @@ func (c *Client) ListObjects(ctx context.Context, bucketName string, opts ListOb
 	}
 
 	// Check whether this is snowball region, if yes ListObjectsV2 doesn't work, fallback to listObjectsV1.
-	if location, ok := c.bucketLocCache.Get(bucketName); ok {
-		if location == "snowball" {
-			return c.listObjects(ctx, bucketName, opts)
-		}
+	if location == "snowball" {
+		return c.listObjects(ctx, bucketName, opts)
 	}
 
 	return c.listObjectsV2(ctx, bucketName, opts)
+}
+
+// ListUnsorted returns an object list iterator, the objects are returned in
+// the order the server finds them instead of the lexical order mandated by
+// S3. Skipping the sort lets the server stream the listing as it is read from
+// each erasure set, which is substantially faster on large prefixes.
+//
+// This is a MinIO extension, S3 implementations that do not support it will
+// keep returning a regular lexically sorted listing. Unsorted listing is only
+// available on ListObjects V2, so 'UseV1', 'WithVersions' and snowball buckets
+// are rejected instead of silently falling back to a sorted listing.
+//
+// Pagination is positional, the continuation token encodes a position in the
+// listing and not a key, therefore 'StartAfter' cannot be honored and is
+// rejected as well.
+//
+//	api := client.New(....)
+//	for object := range api.ListUnsorted(ctx, "mytestbucket", minio.ListObjectsOptions{Prefix: "starthere", Recursive: true}) {
+//	    if object.Err != nil {
+//	        // handle the errors.
+//	    }
+//	    fmt.Println(object)
+//	}
+//
+// Canceling the context the iterator will stop, if you wish to discard the yielding make sure
+// to cancel the passed context without that you might leak coroutines
+func (c *Client) ListUnsorted(ctx context.Context, bucketName string, opts ListObjectsOptions) iter.Seq[ObjectInfo] {
+	opts.Unsorted = true
+	return c.ListObjectsIter(ctx, bucketName, opts)
 }
 
 // ListIncompleteUploads - List incompletely uploaded multipart objects.
@@ -691,14 +939,24 @@ func (c *Client) ListObjects(ctx context.Context, bucketName string, opts ListOb
 // If you enable recursive as 'true' this function will return back all
 // the multipart objects in a given bucket name.
 //
-//   api := client.New(....)
-//   // Recurively list all objects in 'mytestbucket'
-//   recursive := true
-//   for message := range api.ListIncompleteUploads(context.Background(), "mytestbucket", "starthere", recursive) {
-//       fmt.Println(message)
-//   }
+//	api := client.New(....)
+//	// Recurively list all objects in 'mytestbucket'
+//	recursive := true
+//	for message := range api.ListIncompleteUploads(context.Background(), "mytestbucket", "starthere", recursive) {
+//	    fmt.Println(message)
+//	}
 func (c *Client) ListIncompleteUploads(ctx context.Context, bucketName, objectPrefix string, recursive bool) <-chan ObjectMultipartInfo {
 	return c.listIncompleteUploads(ctx, bucketName, objectPrefix, recursive)
+}
+
+// contextCanceled returns whether a context is canceled.
+func contextCanceled(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 // listIncompleteUploads lists all incomplete uploads.
@@ -728,7 +986,15 @@ func (c *Client) listIncompleteUploads(ctx context.Context, bucketName, objectPr
 		return objectMultipartStatCh
 	}
 	go func(objectMultipartStatCh chan<- ObjectMultipartInfo) {
-		defer close(objectMultipartStatCh)
+		defer func() {
+			if contextCanceled(ctx) {
+				objectMultipartStatCh <- ObjectMultipartInfo{
+					Err: ctx.Err(),
+				}
+			}
+			close(objectMultipartStatCh)
+		}()
+
 		// object and upload ID marker for future requests.
 		var objectMarker string
 		var uploadIDMarker string
@@ -774,7 +1040,6 @@ func (c *Client) listIncompleteUploads(ctx context.Context, bucketName, objectPr
 	}(objectMultipartStatCh)
 	// return.
 	return objectMultipartStatCh
-
 }
 
 // listMultipartUploadsQuery - (List Multipart Uploads).
@@ -867,6 +1132,8 @@ func (c *Client) listMultipartUploadsQuery(ctx context.Context, bucketName, keyM
 }
 
 // listObjectParts list all object parts recursively.
+//
+//lint:ignore U1000 Keep this around
 func (c *Client) listObjectParts(ctx context.Context, bucketName, objectName, uploadID string) (partsInfo map[int]ObjectPart, err error) {
 	// Part number marker for the next batch of request.
 	var nextPartNumberMarker int
@@ -914,7 +1181,7 @@ func (c *Client) findUploadIDs(ctx context.Context, bucketName, objectName strin
 }
 
 // listObjectPartsQuery (List Parts query)
-//     - lists some or all (up to 1000) parts that have been uploaded
+//   - lists some or all (up to 1000) parts that have been uploaded
 //     for a specific multipart upload
 //
 // You can use the request parameters as selection criteria to return

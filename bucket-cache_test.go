@@ -21,7 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -29,24 +29,13 @@ import (
 	"testing"
 
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/kvcache"
 	"github.com/minio/minio-go/v7/pkg/signer"
 )
 
-// Test validates `newBucketLocationCache`.
-func TestNewBucketLocationCache(t *testing.T) {
-	expectedBucketLocationcache := &bucketLocationCache{
-		items: make(map[string]string),
-	}
-	actualBucketLocationCache := newBucketLocationCache()
-
-	if !reflect.DeepEqual(actualBucketLocationCache, expectedBucketLocationcache) {
-		t.Errorf("Unexpected return value")
-	}
-}
-
-// Tests validate bucketLocationCache operations.
+// Tests validate kvCache operations.
 func TestBucketLocationCacheOps(t *testing.T) {
-	testBucketLocationCache := newBucketLocationCache()
+	testBucketLocationCache := &kvcache.Cache[string, string]{}
 	expectedBucketName := "minio-bucket"
 	expectedLocation := "us-east-1"
 	testBucketLocationCache.Set(expectedBucketName, expectedLocation)
@@ -75,11 +64,20 @@ func TestGetBucketLocationRequest(t *testing.T) {
 
 		// Set get bucket location always as path style.
 		targetURL := *c.endpointURL
-		targetURL.Path = path.Join(bucketName, "") + "/"
-		targetURL.RawQuery = urlValues.Encode()
+
+		isVirtualStyle := c.isVirtualHostStyleRequest(targetURL, bucketName)
+
+		var urlStr string
+		if isVirtualStyle {
+			urlStr = targetURL.Scheme + "://" + bucketName + "." + targetURL.Host + "/?location"
+		} else {
+			targetURL.Path = path.Join(bucketName, "") + "/"
+			targetURL.RawQuery = urlValues.Encode()
+			urlStr = targetURL.String()
+		}
 
 		// Get a new HTTP request for the method.
-		req, err := http.NewRequest(http.MethodGet, targetURL.String(), nil)
+		req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +86,7 @@ func TestGetBucketLocationRequest(t *testing.T) {
 		c.setUserAgent(req)
 
 		// Get credentials from the configured credentials provider.
-		value, err := c.credsProvider.Get()
+		value, err := c.credsProvider.GetWithContext(c.CredContext())
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +124,6 @@ func TestGetBucketLocationRequest(t *testing.T) {
 		}
 
 		return req, nil
-
 	}
 	// Info for 'Client' creation.
 	// Will be used as arguments for 'NewClient'.
@@ -280,7 +277,7 @@ func TestGetBucketLocationRequest(t *testing.T) {
 // generates http response with bucket location set in the body.
 func generateLocationResponse(resp *http.Response, bodyContent []byte) (*http.Response, error) {
 	resp.StatusCode = http.StatusOK
-	resp.Body = ioutil.NopCloser(bytes.NewBuffer(bodyContent))
+	resp.Body = io.NopCloser(bytes.NewBuffer(bodyContent))
 	return resp, nil
 }
 
@@ -294,7 +291,7 @@ func TestProcessBucketLocationResponse(t *testing.T) {
 
 	APIErrors := []APIError{
 		{
-			Code:           "AccessDenied",
+			Code:           AccessDenied,
 			Description:    "Access Denied",
 			HTTPStatusCode: http.StatusUnauthorized,
 		},
@@ -349,4 +346,13 @@ func TestProcessBucketLocationResponse(t *testing.T) {
 			}
 		}
 	}
+
+	// Regression test: a nil response must return an error instead of
+	// panicking on a nil-dereference when accessing resp.Body.
+	t.Run("nil response", func(t *testing.T) {
+		_, err := processBucketLocationResponse(nil, "my-bucket")
+		if err == nil {
+			t.Fatal("Expected an error for nil response, but got nil")
+		}
+	})
 }

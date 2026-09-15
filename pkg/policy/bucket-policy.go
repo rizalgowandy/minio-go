@@ -18,11 +18,11 @@
 package policy
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/minio/minio-go/v7/pkg/set"
 )
 
@@ -32,9 +32,9 @@ type BucketPolicy string
 // Different types of Policies currently supported for buckets.
 const (
 	BucketPolicyNone      BucketPolicy = "none"
-	BucketPolicyReadOnly               = "readonly"
-	BucketPolicyReadWrite              = "readwrite"
-	BucketPolicyWriteOnly              = "writeonly"
+	BucketPolicyReadOnly  BucketPolicy = "readonly"
+	BucketPolicyReadWrite BucketPolicy = "readwrite"
+	BucketPolicyWriteOnly BucketPolicy = "writeonly"
 )
 
 // IsValidBucketPolicy - returns true if policy is valid and supported, false otherwise.
@@ -74,7 +74,7 @@ var validActions = commonBucketActions.
 	Union(readOnlyObjectActions).
 	Union(writeOnlyObjectActions)
 
-var startsWithFunc = func(resource string, resourcePrefix string) bool {
+var startsWithFunc = func(resource, resourcePrefix string) bool {
 	return strings.HasPrefix(resource, resourcePrefix)
 }
 
@@ -89,7 +89,6 @@ type User struct {
 // User string but it can also take a string.
 func (u *User) UnmarshalJSON(data []byte) error {
 	// Try to unmarshal data in a struct equal to User,
-	var json = jsoniter.ConfigCompatibleWithStandardLibrary
 	// to avoid infinite recursive call of this function
 	type AliasUser User
 	var au AliasUser
@@ -155,7 +154,7 @@ func isValidStatement(statement Statement, bucketName string) bool {
 }
 
 // Returns new statements with bucket actions for given policy.
-func newBucketStatement(policy BucketPolicy, bucketName string, prefix string) (statements []Statement) {
+func newBucketStatement(policy BucketPolicy, bucketName, prefix string) (statements []Statement) {
 	statements = []Statement{}
 	if policy == BucketPolicyNone || bucketName == "" {
 		return statements
@@ -182,9 +181,9 @@ func newBucketStatement(policy BucketPolicy, bucketName string, prefix string) (
 		}
 		if prefix != "" {
 			condKeyMap := make(ConditionKeyMap)
-			condKeyMap.Add("s3:prefix", set.CreateStringSet(prefix))
+			condKeyMap.Add("s3:prefix", set.CreateStringSet(prefix+"*"))
 			condMap := make(ConditionMap)
-			condMap.Add("StringEquals", condKeyMap)
+			condMap.Add("StringLike", condKeyMap)
 			statement.Conditions = condMap
 		}
 		statements = append(statements, statement)
@@ -205,7 +204,7 @@ func newBucketStatement(policy BucketPolicy, bucketName string, prefix string) (
 }
 
 // Returns new statements contains object actions for given policy.
-func newObjectStatement(policy BucketPolicy, bucketName string, prefix string) (statements []Statement) {
+func newObjectStatement(policy BucketPolicy, bucketName, prefix string) (statements []Statement) {
 	statements = []Statement{}
 	if policy == BucketPolicyNone || bucketName == "" {
 		return statements
@@ -218,11 +217,12 @@ func newObjectStatement(policy BucketPolicy, bucketName string, prefix string) (
 		Sid:       "",
 	}
 
-	if policy == BucketPolicyReadOnly {
+	switch policy {
+	case BucketPolicyReadOnly:
 		statement.Actions = readOnlyObjectActions
-	} else if policy == BucketPolicyWriteOnly {
+	case BucketPolicyWriteOnly:
 		statement.Actions = writeOnlyObjectActions
-	} else if policy == BucketPolicyReadWrite {
+	case BucketPolicyReadWrite:
 		statement.Actions = readWriteObjectActions
 	}
 
@@ -231,7 +231,7 @@ func newObjectStatement(policy BucketPolicy, bucketName string, prefix string) (
 }
 
 // Returns new statements for given policy, bucket and prefix.
-func newStatements(policy BucketPolicy, bucketName string, prefix string) (statements []Statement) {
+func newStatements(policy BucketPolicy, bucketName, prefix string) (statements []Statement) {
 	statements = []Statement{}
 	ns := newBucketStatement(policy, bucketName, prefix)
 	statements = append(statements, ns...)
@@ -243,7 +243,7 @@ func newStatements(policy BucketPolicy, bucketName string, prefix string) (state
 }
 
 // Returns whether given bucket statements are used by other than given prefix statements.
-func getInUsePolicy(statements []Statement, bucketName string, prefix string) (readOnlyInUse, writeOnlyInUse bool) {
+func getInUsePolicy(statements []Statement, bucketName, prefix string) (readOnlyInUse, writeOnlyInUse bool) {
 	resourcePrefix := awsResourcePrefix + bucketName + "/"
 	objectResource := awsResourcePrefix + bucketName + "/" + prefix + "*"
 
@@ -280,7 +280,7 @@ func removeObjectActions(statement Statement, objectResource string) Statement {
 }
 
 // Removes bucket actions for given policy in given statement.
-func removeBucketActions(statement Statement, prefix string, bucketResource string, readOnlyInUse, writeOnlyInUse bool) Statement {
+func removeBucketActions(statement Statement, prefix, bucketResource string, readOnlyInUse, writeOnlyInUse bool) Statement {
 	removeReadOnly := func() {
 		if !statement.Actions.Intersection(readOnlyBucketActions).Equals(readOnlyBucketActions) {
 			return
@@ -342,7 +342,7 @@ func removeBucketActions(statement Statement, prefix string, bucketResource stri
 
 // Returns statements containing removed actions/statements for given
 // policy, bucket name and prefix.
-func removeStatements(statements []Statement, bucketName string, prefix string) []Statement {
+func removeStatements(statements []Statement, bucketName, prefix string) []Statement {
 	bucketResource := awsResourcePrefix + bucketName
 	objectResource := awsResourcePrefix + bucketName + "/" + prefix + "*"
 	readOnlyInUse, writeOnlyInUse := getInUsePolicy(statements, bucketName, prefix)
@@ -372,7 +372,6 @@ func removeStatements(statements []Statement, bucketName string, prefix string) 
 				statement.Actions.Intersection(readOnlyBucketActions).Equals(readOnlyBucketActions) &&
 				statement.Effect == "Allow" &&
 				statement.Principal.AWS.Contains("*") {
-
 				if statement.Conditions != nil {
 					stringEqualsValue := statement.Conditions["StringEquals"]
 					values := set.NewStringSet()
@@ -430,10 +429,10 @@ func removeStatements(statements []Statement, bucketName string, prefix string) 
 	return out
 }
 
-//  Appends given statement into statement list to have unique statements.
-//  - If statement already exists in statement list, it ignores.
-//  - If statement exists with different conditions, they are merged.
-//  - Else the statement is appended to statement list.
+// Appends given statement into statement list to have unique statements.
+// - If statement already exists in statement list, it ignores.
+// - If statement exists with different conditions, they are merged.
+// - Else the statement is appended to statement list.
 func appendStatement(statements []Statement, statement Statement) []Statement {
 	for i, s := range statements {
 		if s.Actions.Equals(statement.Actions) &&
@@ -466,7 +465,7 @@ func appendStatement(statements []Statement, statement Statement) []Statement {
 		}
 	}
 
-	if !(statement.Actions.IsEmpty() && statement.Resources.IsEmpty()) {
+	if !statement.Actions.IsEmpty() || !statement.Resources.IsEmpty() {
 		return append(statements, statement)
 	}
 
@@ -474,7 +473,7 @@ func appendStatement(statements []Statement, statement Statement) []Statement {
 }
 
 // Appends two statement lists.
-func appendStatements(statements []Statement, appendStatements []Statement) []Statement {
+func appendStatements(statements, appendStatements []Statement) []Statement {
 	for _, s := range appendStatements {
 		statements = appendStatement(statements, s)
 	}
@@ -484,7 +483,7 @@ func appendStatements(statements []Statement, appendStatements []Statement) []St
 
 // Returns policy of given bucket statement.
 func getBucketPolicy(statement Statement, prefix string) (commonFound, readOnly, writeOnly bool) {
-	if !(statement.Effect == "Allow" && statement.Principal.AWS.Contains("*")) {
+	if statement.Effect != "Allow" || !statement.Principal.AWS.Contains("*") {
 		return commonFound, readOnly, writeOnly
 	}
 
@@ -512,6 +511,18 @@ func getBucketPolicy(statement Statement, prefix string) (commonFound, readOnly,
 						readOnly = true
 					}
 				}
+			} else if stringLikeValue, ok := statement.Conditions["StringLike"]; ok {
+				if s3PrefixValues, ok := stringLikeValue["s3:prefix"]; ok {
+					if s3PrefixValues.Contains(prefix + "*") {
+						readOnly = true
+					}
+				}
+			} else if stringNotLikeValue, ok := statement.Conditions["StringNotLike"]; ok {
+				if s3PrefixValues, ok := stringNotLikeValue["s3:prefix"]; ok {
+					if !s3PrefixValues.Contains(prefix + "*") {
+						readOnly = true
+					}
+				}
 			}
 		} else if prefix == "" && statement.Conditions == nil {
 			readOnly = true
@@ -524,7 +535,7 @@ func getBucketPolicy(statement Statement, prefix string) (commonFound, readOnly,
 }
 
 // Returns policy of given object statement.
-func getObjectPolicy(statement Statement) (readOnly bool, writeOnly bool) {
+func getObjectPolicy(statement Statement) (readOnly, writeOnly bool) {
 	if statement.Effect == "Allow" &&
 		statement.Principal.AWS.Contains("*") &&
 		statement.Conditions == nil {
@@ -540,7 +551,7 @@ func getObjectPolicy(statement Statement) (readOnly bool, writeOnly bool) {
 }
 
 // GetPolicy - Returns policy of given bucket name, prefix in given statements.
-func GetPolicy(statements []Statement, bucketName string, prefix string) BucketPolicy {
+func GetPolicy(statements []Statement, bucketName, prefix string) BucketPolicy {
 	bucketResource := awsResourcePrefix + bucketName
 	objectResource := awsResourcePrefix + bucketName + "/" + prefix + "*"
 
@@ -626,7 +637,7 @@ func GetPolicies(statements []Statement, bucketName, prefix string) map[string]B
 }
 
 // SetPolicy - Returns new statements containing policy of given bucket name and prefix are appended.
-func SetPolicy(statements []Statement, policy BucketPolicy, bucketName string, prefix string) []Statement {
+func SetPolicy(statements []Statement, policy BucketPolicy, bucketName, prefix string) []Statement {
 	out := removeStatements(statements, bucketName, prefix)
 	// fmt.Println("out = ")
 	// printstatement(out)
